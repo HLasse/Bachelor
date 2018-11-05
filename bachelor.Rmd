@@ -18,7 +18,7 @@ p_load(tidyverse, stringr)
 
 ##Function to load and add a column for filename
 ```{r}
-trimload <- function(file){
+fileload <- function(file){
   df <- read_csv(file)
 #  df = df[!df$NAQ==0,]
   df$filename <- as.factor(file)
@@ -31,7 +31,7 @@ trimload <- function(file){
 file.list <- list.files( pattern = '*.csv', full.names = T)
 
 
-df.list <- lapply(file.list, trimload)
+df.list <- lapply(file.list, fileload)
 #turning into a data frame
 df <- bind_rows(df.list)
 
@@ -42,7 +42,8 @@ df <- bind_rows(df.list)
 #defining voice activity as VAD being > 0.6. Adding binary column with voice 1 and no voice 0 
 df$voice <- ifelse(df$VAD > 0.6, 1, 0)
 #Since each file is split in several files, we create a single id column, containing only the original file name
-df$id <- substr(df$filename, 3, 9) %>% str_remove_all("_")
+df$id <- substr(df$filename, 3, 9) %>% 
+  str_remove_all("_")
 
 
 # 30 seconds = 3000 rows (1 row = 10 ms )
@@ -97,7 +98,26 @@ sumdf <- df %>%
 #merging pauses and features
 mergedDf <- merge(sumPauseDf, sumdf, by = c("id", ".groups"))
 
+#creating new column to merge clinical features
+mergedDf$mergeID <- strsplit(mergedDf$id, "v")[[1]][1]
+
+####MAKE NEW COLUMN IN SUM DF WITH ID WITH NO V1/V2
+
+
+#loading and merges with clinical and demographical data
+demoData <- read.csv("/home/lasse/Desktop/Bachelor/DemClinicalData.csv", sep = ";")
+#removing the chronic depression patients
+demoData <- demoData %>%
+  filter(Diagnosis2 != "ChronicDepression")
+#creating new column
+demoData$temp <- ifelse(demoData$Diagnosis == "Control", "dc", "dp")
+demoData$mergeID <- paste0(demoData$temp, demoData$ID)
+
+#should be mergeable now by mergeID
+
+
 ##########################  TO DO ###################################
+# Merge with clinical data
 # Add column for diagnosis 0/1
 # Add column to diagnosis == 1 subset for remission 0/1
 # Split in test and training sets
