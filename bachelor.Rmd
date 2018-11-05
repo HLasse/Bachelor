@@ -1,0 +1,149 @@
+---
+title: "Bachelor"
+author: "Lasse Hansen"
+date: "October 23, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+setwd("~/Desktop/test/2/sliced")
+p_load(tidyverse, stringr)
+
+```
+
+
+##Function to load and add a column for filename
+```{r}
+trimload <- function(file){
+  df <- read_csv(file)
+#  df = df[!df$NAQ==0,]
+  df$filename <- as.factor(file)
+  return(df)
+}
+```
+
+#loading data
+```{r}
+file.list <- list.files( pattern = '*.csv', full.names = T)
+
+
+df.list <- lapply(file.list, trimload)
+#turning into a data frame
+df <- bind_rows(df.list)
+
+```
+
+##Preprocessing
+```{r Preprocessing}
+#defining voice activity as VAD being > 0.6. Adding binary column with voice 1 and no voice 0 
+df$voice <- ifelse(df$VAD > 0.6, 1, 0)
+#Since each file is split in several files, we create a single id column, containing only the original file name
+df$id <- substr(df$filename, 3, 9) %>% str_remove_all("_")
+
+
+# 30 seconds = 3000 rows (1 row = 10 ms )
+#adding 30 second groups (in column called .groups)
+df <- df %>%
+  group_by(id) %>%
+  #creates a group column containing 3000 rows (ie. 30 secs)
+  #if there are not enough data points to fill up a group, the remaining data is discarded
+  do(groupdata2::group(., n=  3000, method = "greedy", force_equal = T)) %>% 
+  # Convert .subgroups to an integer and then to a factor
+  mutate(.groups = as.integer(.groups),
+         .groups = as.factor(.groups))
+
+##########################  PAUSES ###################################
+
+#creating df with only the pauses. A column called consec is added which counts the number of consecutive value in voice.
+#data points with no voice activity are discarded
+pauseDf <- df %>% 
+  select(time, id, voice, .groups) %>%  
+  group_by(id, .groups) %>%
+  mutate(consec = sequence(rle(as.character(voice))$lengths)) %>%
+  filter(voice == 0 )
+
+#finding the beginning of a new pause (discarding the first value since its row 1)
+flag_one <- which(pauseDf$consec == 1)[-1]
+#substracting 1 to find the pause length
+one_before <- flag_one - 1
+#creating df with the pause lengths 
+pauseDf <- pauseDf[one_before,]
+#if there is less than 300 ms or more than 10 seconds before next voice activity it is not considered a pause
+pauseDf <- pauseDf %>%
+  filter(consec > 30 & consec < 1000)
+
+#summarising pauses to mean length, sd of length and number of pauses
+sumPauseDf <- pauseDf %>% 
+  group_by(id, .groups) %>% 
+  summarise(meanPauseLength = mean(consec), medianPauseLength = median(consec), sdPauseLength = sd(consec), iqrPauseLength = IQR(consec), nPauses = n())
+
+##########################  SUMMARISING FEATURES ###################################
+
+#removing features which could not be extracted
+remove <- c("HMPDM_0", "HMPDM_1", "HMPDM_2", "vowelSpace")
+df[, remove] <- NULL
+
+#removing columns without voice activity and summarising with median and iqr (sd, others???)
+sumdf <- df %>% 
+  filter(voice == 1) %>%
+  group_by(id, .groups) %>% 
+  summarise_at(.vars = names(.)[2:78],
+               .funs = c(median="median", IQR = "IQR"))
+
+#merging pauses and features
+mergedDf <- merge(sumPauseDf, sumdf, by = c("id", ".groups"))
+
+##########################  TO DO ###################################
+# Add column for diagnosis 0/1
+# Add column to diagnosis == 1 subset for remission 0/1
+# Split in test and training sets
+
+# Write to files
+```
+
+
+Prepare for and run elastic net on each of the outcomes
+```{r elastic net}
+
+```
+
+
+Bayesian logistic models
+```{r}
+
+```
+
+SVM models
+```{r}
+# remember to tune and optimize https://www.r-bloggers.com/machine-learning-using-support-vector-machines/
+# non linear svm? https://machinelearningmastery.com/non-linear-regression-in-r/ 
+#                 https://stats.stackexchange.com/questions/10551/how-do-i-choose-what-svm-kernels-to-use
+
+```
+
+Random forest (adaboost or xgboost?)
+```{r}
+
+```
+
+Naive Bayes
+```{r}
+
+```
+
+Nearest neighbors
+```{r}
+
+```
+
+Ensemble
+```{r}
+
+```
+
+
+
