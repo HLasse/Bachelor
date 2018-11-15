@@ -73,14 +73,14 @@ flag_one <- which(pauseDf$consec == 1)[-1]
 one_before <- flag_one - 1
 #creating df with the pause lengths 
 pauseDf <- pauseDf[one_before,]
-#if there is less than 300 ms or more than 10 seconds before next voice activity it is not considered a pause
+#if there is less than 250 ms or more than 10 seconds before next voice activity it is not considered a pause
 pauseDf <- pauseDf %>%
-  filter(consec > 30 & consec < 1000)
+  filter(consec > 25 & consec < 1000)
 
 #summarising pauses to mean length, sd of length and number of pauses
 sumPauseDf <- pauseDf %>% 
   group_by(id, .groups) %>% 
-  summarise(meanPauseLength = mean(consec), medianPauseLength = median(consec), sdPauseLength = sd(consec), iqrPauseLength = IQR(consec), nPauses = n())
+  summarise(meanPauseLength = mean(consec), medianPauseLength = median(consec), sdPauseLength = sd(consec), iqrPauseLength = IQR(consec), nPauses = n(), totalPauseTime = sum(consec))
 
 ##########################  SUMMARISING FEATURES ###################################
 
@@ -116,20 +116,110 @@ demoData$mergeID <- paste0(demoData$temp, demoData$ID)
 #should be mergeable now by mergeID
 
 
-##########################  TO DO ###################################
-# Merge with clinical data
-# Add column for diagnosis 0/1
-# Add column to diagnosis == 1 subset for remission 0/1
-# Split in test and training sets
+#subsetting
+depDf <- subset(mergedDf, diagnosis == 1)
+
+#subset only for controls and dp_v1
+
+# Split in test and training sets (use groupdata2)
 
 # Write to files
+write.csv(depDf, "depDf.csv")
+write.csv(contDep, "contDep.csv")
 ```
 
 
-Prepare for and run elastic net on each of the outcomes
+Preparing the elastic net
 ```{r elastic net}
 
+#################### MODEL 1 - DIAGNOSIS FROM VOICE ###############
+contDep < read.csv("contDep.csv")- 
+#df$X <- NULL
+
+
+#creating predictor column 
+xContDep <- contDep[, -c(158:168)] #change to the values in the set
+xContDep$filename = NULL
+
+#creating outcome variable
+yContDep <- select(contDep, diagnosis) 
+
+#check for NA
+#identical(xContDep, xContDep[complete.cases(xContDep),])
+
+#################### MODEL 2 - REMISSION FROM VOICE ###############
+dep <- read.csv('depDf.csv')
+#df$X <- NULL
+
+
+#creating predictor column 
+xDep <- dep[, -c(158:168)] #change to the values in the set
+xDep$filename = NULL
+
+#creating outcome variable
+yDep <- select(contDep, remission) 
+
+#check for NA
+#identical(xDep, xDep[complete.cases(xDep),])
+
 ```
+
+##Running the elastic net
+```{r}
+## Define predictors and outcome
+xContDep <- model.matrix(~.-1, data= xContDep) # where all the columns except the first are predictors
+xDep <- model.matrix(~.-1, data= xDep)
+
+
+# makes outcome variables into a non data frame because glmnet doesn’t deal with dataframes
+yContDep <- as.numeric(unlist(yContDep))
+yDep <- as.numeric(unlist(yDep))
+
+
+#scale all features
+xContDep <- scale(xContDep)[,]
+xDep <- scale(xDep)[,]
+
+#function to run the elastic net. First chooses the optimal alpha, then runs the elastic net
+elasticfun <- function(y, x){
+  # Define cross-validated alpha selection (alpha indicates how strong the correlation btw predictors should be for it to be taken   into account when discarding predictors)
+  alphaslist<-seq(0,1,by=0.1)
+  foldslist<-seq(4,12)
+  pars=expand.grid(alphaslist,foldslist)
+
+  cvm1=matrix(rep(0,length(alphaslist)))
+
+  elasticnet1<-lapply(1:length(cvm1), 
+                  function(a){
+                    cv.glmnet(x, y, alpha=alphaslist[a], family="binomial", 
+                                                         lambda.min.ratio=.001,nfolds = 5)})
+
+  for (i in 1:length(alphaslist)) {cvm1[i]=min(elasticnet1[[i]]$cvm)}
+
+  n1=which(cvm1==min(cvm1))
+
+  alpha1=alphaslist[n1]
+
+# Run cross-validated elastic net with the chosen alpha (to choose lambda)
+  mod_cv <- cv.glmnet(x=x, y=y, family='binomial', alpha=alpha1, nfolds=5) # Modify family if not binomial
+  coefs=as.data.frame(as.matrix(coef(mod_cv, mod_cv$lambda.1se)))
+  coefs$predictors<-rownames(coefs)
+  rownames(coefs) <- NULL
+  names(coefs)[1] <- "betas"
+  coefs=subset(coefs,betas!=0)
+  coefs1=coefs[order(abs(coefs$betas)),]
+  return(coefs1)
+}
+
+
+contDepNet <- elasticfun(yContDep, xContDep)
+depNet <- elasticfun(yDep, xDep)
+# #saving values
+# save(contDepNet, file = "contDepNet.RData")
+# save(depNet, file = "depNet.RData")
+```
+
+
 
 
 Bayesian logistic models
