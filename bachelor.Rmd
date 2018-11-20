@@ -10,40 +10,48 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r}
-setwd("~/Desktop/test/2/sliced")
-p_load(tidyverse, stringr)
+setwd("~/Desktop/Bachelor/Autobiographic/")
+p_load(tidyverse, stringr, beepr, groupdata2, glmnet)
 
 ```
 
 
 ##Function to load and add a column for filename
 ```{r}
-fileload <- function(file){
-  df <- read_csv(file)
-#  df = df[!df$NAQ==0,]
-  df$filename <- as.factor(file)
+trimload <- function(file){
+  df <- data.table::fread(file)
+  df$filename <- as.character(file)
   return(df)
 }
 ```
 
 #loading data
 ```{r}
-file.list <- list.files( pattern = '*.csv', full.names = T)
+folders <- list.files(pattern = '*16khz')
+folderSliced <- list.files(folders, pattern = 'sliced', full.names =T)
+
+cont <- list.files(folderSliced[1], pattern = '*.csv', full.names = T)
+dp1 <- list.files(folderSliced[2], pattern = '*.csv', full.names = T)
+dp2 <- list.files(folderSliced[3], pattern = '*.csv', full.names = T)
 
 
-df.list <- lapply(file.list, fileload)
-#turning into a data frame
-df <- bind_rows(df.list)
+contDf <- lapply(cont, trimload) %>%
+  bind_rows(.); beep(4)
 
+dp1Df <- lapply(dp1, trimload) %>%
+  bind_rows(); beep(4)
+
+dp2Df <- lapply(dp2, trimload) %>%
+  bind_rows(); beep(4)
 ```
 
 ##Preprocessing
 ```{r Preprocessing}
+preproz <- function(df){
 #defining voice activity as VAD being > 0.6. Adding binary column with voice 1 and no voice 0 
 df$voice <- ifelse(df$VAD > 0.6, 1, 0)
 #Since each file is split in several files, we create a single id column, containing only the original file name
-df$id <- substr(df$filename, 3, 9) %>% 
-  str_remove_all("_")
+df$id <- substr(df$filename, 18, 24) %>% str_remove_all("_")
 
 
 # 30 seconds = 3000 rows (1 row = 10 ms )
@@ -73,37 +81,102 @@ flag_one <- which(pauseDf$consec == 1)[-1]
 one_before <- flag_one - 1
 #creating df with the pause lengths 
 pauseDf <- pauseDf[one_before,]
-#if there is less than 250 ms or more than 10 seconds before next voice activity it is not considered a pause
+#if there is less than 300 ms or more than 10 seconds before next voice activity it is not considered a pause
 pauseDf <- pauseDf %>%
-  filter(consec > 25 & consec < 1000)
+  filter(consec > 30 & consec < 1000)
 
 #summarising pauses to mean length, sd of length and number of pauses
 sumPauseDf <- pauseDf %>% 
+  group_by(id) %>%
+  mutate(consec = scale(consec)) %>%
   group_by(id, .groups) %>% 
-  summarise(meanPauseLength = mean(consec), medianPauseLength = median(consec), sdPauseLength = sd(consec), iqrPauseLength = IQR(consec), nPauses = n(), totalPauseTime = sum(consec))
+  summarise(meanPauseLength = mean(consec), medianPauseLength = median(consec), sdPauseLength = sd(consec), iqrPauseLength = IQR(consec), nPauses = n())
 
 ##########################  SUMMARISING FEATURES ###################################
 
 #removing features which could not be extracted
-remove <- c("HMPDM_0", "HMPDM_1", "HMPDM_2", "vowelSpace")
+remove <- c("HMPDM_0", "HMPDM_1", "HMPDM_2", "HMPDM_3", "HMPDM_4", "HMPDM_5", "HMPDM_6", "HMPDM_7", "HMPDM_8", "HMPDM_9", "vowelSpace")
 df[, remove] <- NULL
 
 #removing columns without voice activity and summarising with median and iqr (sd, others???)
 sumdf <- df %>% 
   filter(voice == 1) %>%
+  group_by(id) %>%
+  mutate_at(.vars = names(.)[2:70],
+            .funs = scale) %>%
   group_by(id, .groups) %>% 
-  summarise_at(.vars = names(.)[2:78],
+  summarise_at(.vars = names(.)[2:70],
                .funs = c(median="median", IQR = "IQR"))
 
 #merging pauses and features
 mergedDf <- merge(sumPauseDf, sumdf, by = c("id", ".groups"))
 
-#creating new column to merge clinical features
-mergedDf$mergeID <- strsplit(mergedDf$id, "v")[[1]][1]
+return(mergedDf)
+}
+
+
+```
+
+
+#arrange vars function
+```{r arrange vars function}
+##arrange df vars by position
+##'vars' must be a named vector, e.g. c("var.name"=1)
+arrange.vars <- function(data, vars){
+    ##stop if not a data.frame (but should work for matrices as well)
+    stopifnot(is.data.frame(data))
+
+    ##sort out inputs
+    data.nms <- names(data)
+    var.nr <- length(data.nms)
+    var.nms <- names(vars)
+    var.pos <- vars
+    ##sanity checks
+    stopifnot( !any(duplicated(var.nms)), 
+               !any(duplicated(var.pos)) )
+    stopifnot( is.character(var.nms), 
+               is.numeric(var.pos) )
+    stopifnot( all(var.nms %in% data.nms) )
+    stopifnot( all(var.pos > 0), 
+               all(var.pos <= var.nr) )
+
+    ##prepare output
+    out.vec <- character(var.nr)
+    out.vec[var.pos] <- var.nms
+    out.vec[-var.pos] <- data.nms[ !(data.nms %in% var.nms) ]
+    stopifnot( length(out.vec)==var.nr )
+
+    ##re-arrange vars by position
+    data <- data[ , out.vec]
+    return(data)
+}
+```
+
+
+```{r}
+sumContDf <- preproz(contDf); beep(2)
+#write.csv(sumContDf, "sumControls.csv")
+
+sumDp1Df <- preproz(dp1Df)
+#write.csv(sumDp1Df, 'sumDp1.csv')
+
+sumDp2Df <- preproz(dp2Df)
+#write.csv(sumDp2Df, 'sumDp2.csv')
+
+sumContDf <- read.csv('sumControls.csv')
+sumContDf$X <- NULL
+sumDp1Df <- read.csv('sumDp1.csv')
+sumDp1Df$X <- NULL
+
+
+df <- rbind(sumContDf, sumDp1Df, sumDp2Df)
+#write.csv(df, 'combSumDf.csv')
+
 
 ####MAKE NEW COLUMN IN SUM DF WITH ID WITH NO V1/V2
 
-
+df <- read.csv('combSumDf.csv')
+df$X <- NULL
 #loading and merges with clinical and demographical data
 demoData <- read.csv("/home/lasse/Desktop/Bachelor/DemClinicalData.csv", sep = ";")
 #removing the chronic depression patients
@@ -113,19 +186,94 @@ demoData <- demoData %>%
 demoData$temp <- ifelse(demoData$Diagnosis == "Control", "dc", "dp")
 demoData$mergeID <- paste0(demoData$temp, demoData$ID)
 
-#should be mergeable now by mergeID
+#creating new column to merge clinical features
+df$mergeID <- str_sub(df$id, end=-3)
 
 
-#subsetting
-depDf <- subset(mergedDf, diagnosis == 1)
+## NO DEMO DATA FOR DC44 AND DP4 
+# adding their known values to demodata
+missing <- data.frame(ID = c(4, 44), Diagnosis = c('Depression', 'Control'), Gender = c('f', 'f'),
+                      Remission = c(0, NA), mergeID = c('dp4', 'dc44'))
+
+demoData <- bind_rows(demoData, missing)
+
+#NO REMISSION DATA FOR DP25, DP29, DP12. ADDING MANUALLY
+#dp25, dp29, dp12
+demoData$Remission<- ifelse(demoData$mergeID == 'dp25' | demoData$mergeID == 'dp29' | demoData$mergeID == 'dp12',
+                            0, demoData$Remission)
+
+
+mergeDf <- merge(df, demoData, by = 'mergeID')
+
+
+#write.csv(mergeDf, 'fullSumDf.csv', row.names = F)
+
+
+
+
+############################# CREATING SUBSETS FOR MODELLING + TRAIN AND TEST SET ################3
+mergeDf <- read.csv('fullSumDf.csv')
+
+
+mergeDf$visit <- str_sub(mergeDf$id, start= -2)
+#subsetting data to get only depression at first visit
+depDf <- mergeDf %>%
+  filter(Diagnosis == 'Depression' & visit == 'v1')
+
+set.seed(100)
+# Split in test and training sets (use groupdata2)
+depDfParts <- partition(depDf, p = 0.2, id_col = "id", cat_col = 'Remission')
+
+depDf_test_set <- depDfParts[[1]]
+depDf_train_set <- depDfParts[[2]]
+
+#checking amount of remission in test/training set
+depDf_test_set %>% select(Remission, id) %>% group_by(id) %>% summarize(lol = mean(Remission), n()) %>% kable()
+depDf_train_set %>% select(Remission, id) %>% group_by(id) %>% summarize(lol = mean(Remission), count = n()) %>%   group_by(lol) %>% summarize(sum(count)) %>% kable()
+
+#################### 
+# 23 REMISSION IN TOTAL - 4 IN TEST SET, 19 IN TRAINING   
+# 12 NO REMISSION IN TOTAL - 2 IN TEST SET, 10 IN TRAINING
+
+# 180 30 SECONDS WINDOWS WITH REMISSION IN TEST SET - 57 30 SECONDS WINDOWS WITH NO REMISSION
+# 617 30 SECOND WINDOWS WITH REMISSION IN TRAINING SET - 244 30 SECONDS WINDOWS WITH NO REMISSION
+
+####################
+# Write to files
+#write.csv(depDf_test_set, "depDf_test.csv")
+#write.csv(depDf_train_set, "depDf_train.csv")
+
 
 #subset only for controls and dp_v1
+contDepDf <- mergeDf %>%
+  filter(visit == 'v1') 
 
+contDepDf$DiagnosisInteger <- ifelse(contDepDf$Diagnosis == "Depression", 1, 0)
 # Split in test and training sets (use groupdata2)
+contDepParts <- partition(contDepDf, p = 0.2, id_col = "id", cat_col = 'Diagnosis')
 
+contDep_test_set <- contDepParts[[1]]
+contDep_train_set <- contDepParts[[2]]
+
+
+
+#checking amount of diagnosis in test/training set
+contDep_train_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(diagnosis = mean(DiagnosisInteger), n()) %>% kable()
+
+contDep_test_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(lol = mean(DiagnosisInteger), count = n()) %>%   group_by(lol) %>% summarize(sum(count)) %>% kable()
+
+
+#################### 
+# 35  DIAGNOSIS IN TOTAL - 7 IN TEST SET, 28 IN TRAINING   
+# 20 NO DIAGNOSIS IN TOTAL - 4 IN TEST SET, 16 IN TRAINING
+
+# 220 30 SECONDS WINDOWS WITH DEPRESSION IN TEST SET - 63 30 SECONDS WINDOWS WITH NO DEPRESSION
+# 878 30 SECOND WINDOWS WITH DEPRESSION IN TRAINING SET - 305 30 SECONDS WINDOWS WITH NO DEPRESSION
+
+####################
 # Write to files
-write.csv(depDf, "depDf.csv")
-write.csv(contDep, "contDep.csv")
+write.csv(contDep_test_set, "contDep_test.csv")
+write.csv(contDep_train_set, "contDep_train.csv")
 ```
 
 
@@ -133,41 +281,52 @@ Preparing the elastic net
 ```{r elastic net}
 
 #################### MODEL 1 - DIAGNOSIS FROM VOICE ###############
-contDep < read.csv("contDep.csv")- 
-#df$X <- NULL
+contDep <- read.csv("contDep_train.csv")
+remove <- c("X", "Diagnosis2", "temp", "Education", "HamD6_Before", "HamD17_Before", "HamD6_After", "HamD17_After",
+            "ExecutiveFunctionIED", "ExecutiveFunctionOTS", "SustainedAttention", "WorkingMemory", "VerbalMemory", "IQ", "Age")
+contDep[, remove] <- NULL
 
+contDep$Gender <- ifelse(contDep$Gender == "f", 1, 0)
 
+#changing the order of columns
+contDep <- arrange.vars(contDep, c("id"=151, "mergeID"=150, ".groups"=152, "Gender" = 144))
+colnames(contDep)
 #creating predictor column 
-xContDep <- contDep[, -c(158:168)] #change to the values in the set
-xContDep$filename = NULL
+xContDep <- contDep[, -c(144:152)] #change to the values in the set
 
 #creating outcome variable
-yContDep <- select(contDep, diagnosis) 
+yContDep <- select(contDep, DiagnosisInteger) 
 
 #check for NA
-#identical(xContDep, xContDep[complete.cases(xContDep),])
+identical(xContDep, xContDep[complete.cases(xContDep),])
 
 #################### MODEL 2 - REMISSION FROM VOICE ###############
-dep <- read.csv('depDf.csv')
-#df$X <- NULL
+dep <- read.csv('depDf_train.csv')
+remove <- c("X", "Diagnosis2", "temp", "Education", "HamD6_Before", "HamD17_Before", "HamD6_After", "HamD17_After",
+            "ExecutiveFunctionIED", "ExecutiveFunctionOTS", "SustainedAttention", "WorkingMemory", "VerbalMemory", "IQ", "Age")
+dep[, remove] <- NULL
+
+dep$Gender <- ifelse(dep$Gender == "f", 1, 0)
+
+#changing the order of columns
+dep <- arrange.vars(dep, c("id"=151, "mergeID"=150, ".groups"=149, "Gender" = 144))
+colnames(dep)
 
 
 #creating predictor column 
-xDep <- dep[, -c(158:168)] #change to the values in the set
-xDep$filename = NULL
+xDep <- dep[, -c(144:151)] #change to the values in the set
 
 #creating outcome variable
-yDep <- select(contDep, remission) 
+yDep <- select(dep, Remission) 
 
 #check for NA
-#identical(xDep, xDep[complete.cases(xDep),])
-
+identical(xDep, xDep[complete.cases(xDep),])
 ```
 
 ##Running the elastic net
 ```{r}
 ## Define predictors and outcome
-xContDep <- model.matrix(~.-1, data= xContDep) # where all the columns except the first are predictors
+xContDep <- model.matrix(~.-1, data= xContDep) 
 xDep <- model.matrix(~.-1, data= xDep)
 
 
@@ -177,8 +336,9 @@ yDep <- as.numeric(unlist(yDep))
 
 
 #scale all features
-xContDep <- scale(xContDep)[,]
-xDep <- scale(xDep)[,]
+#xContDep <- scale(xContDep)[,]
+#xDep <- scale(xDep)[,]
+
 
 #function to run the elastic net. First chooses the optimal alpha, then runs the elastic net
 elasticfun <- function(y, x){
@@ -214,12 +374,13 @@ elasticfun <- function(y, x){
 
 contDepNet <- elasticfun(yContDep, xContDep)
 depNet <- elasticfun(yDep, xDep)
+
+contDepNet
+depNet
 # #saving values
-# save(contDepNet, file = "contDepNet.RData")
-# save(depNet, file = "depNet.RData")
+save(contDepNet, file = "contDepNet.RData")
+save(depNet, file = "depNet.RData")
 ```
-
-
 
 
 Bayesian logistic models
