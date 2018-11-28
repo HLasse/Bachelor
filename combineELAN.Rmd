@@ -12,29 +12,33 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r}
 p_load(tidyverse)
-setwd("~/Desktop/test/2/sliced")
+setwd("~/Desktop/Bachelor/Autobiographic/Depression2")
 ```
 
 
 #Load txt files from ELAN, add filename and headers
 ```{r}
 ELANload = function(file){
-  df = read_csv(file)
+  df = read.delim(file, header = F)
   df$File = as.factor(file)
   return(df)
 }
 ```
 
 ```{r}
+#20 controls
+#35 depression
+#20 depression 2
+
 
 #creating a list of all the .csv files in all the folders
-file.list <- list.files(pattern = '*.csv', full.names = F)
+file.list <- list.files(pattern = '*.txt', full.names = F)
 
 file.list
 #reading all the csv files in the file.list
 df.list <- lapply(file.list, ELANload)
 #turning into a data frame
-df = bind_rows(df.list)
+df <- bind_rows(df.list)
 
 
 names(df)[1] <- "TimeStart"
@@ -66,7 +70,7 @@ df$Length = NULL
 
 df <- df[c(1,3,2,4)]
 
-write.csv(df, file = 'test.csv')
+write.csv(df, file = 'controls.csv')
 
 
 ```

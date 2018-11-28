@@ -9,10 +9,10 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+#working directory and packages
 ```{r}
 setwd("~/Desktop/Bachelor/Autobiographic/")
-p_load(tidyverse, stringr, beepr, groupdata2, glmnet)
-
+p_load(stringr, beepr, groupdata2, glmnet, brms, caret, kernlab, klaR, glmnet, tidyverse, knitr, pROC, randomForest, xgboost)
 ```
 
 
@@ -43,13 +43,14 @@ dp1Df <- lapply(dp1, trimload) %>%
 
 dp2Df <- lapply(dp2, trimload) %>%
   bind_rows(); beep(4)
+
 ```
 
-##Preprocessing
+##Preprocessing function
 ```{r Preprocessing}
 preproz <- function(df){
 #defining voice activity as VAD being > 0.6. Adding binary column with voice 1 and no voice 0 
-df$voice <- ifelse(df$VAD > 0.6, 1, 0)
+df$voice <- ifelse(df$VAD > 0.5, 1, 0)
 #Since each file is split in several files, we create a single id column, containing only the original file name
 df$id <- substr(df$filename, 18, 24) %>% str_remove_all("_")
 
@@ -70,7 +71,7 @@ df <- df %>%
 #creating df with only the pauses. A column called consec is added which counts the number of consecutive value in voice.
 #data points with no voice activity are discarded
 pauseDf <- df %>% 
-  select(time, id, voice, .groups) %>%  
+  dplyr::select(time, id, voice, .groups) %>%  
   group_by(id, .groups) %>%
   mutate(consec = sequence(rle(as.character(voice))$lengths)) %>%
   filter(voice == 0 )
@@ -87,8 +88,6 @@ pauseDf <- pauseDf %>%
 
 #summarising pauses to mean length, sd of length and number of pauses
 sumPauseDf <- pauseDf %>% 
-  group_by(id) %>%
-  mutate(consec = scale(consec)) %>%
   group_by(id, .groups) %>% 
   summarise(meanPauseLength = mean(consec), medianPauseLength = median(consec), sdPauseLength = sd(consec), iqrPauseLength = IQR(consec), nPauses = n())
 
@@ -101,9 +100,6 @@ df[, remove] <- NULL
 #removing columns without voice activity and summarising with median and iqr (sd, others???)
 sumdf <- df %>% 
   filter(voice == 1) %>%
-  group_by(id) %>%
-  mutate_at(.vars = names(.)[2:70],
-            .funs = scale) %>%
   group_by(id, .groups) %>% 
   summarise_at(.vars = names(.)[2:70],
                .funs = c(median="median", IQR = "IQR"))
@@ -152,31 +148,31 @@ arrange.vars <- function(data, vars){
 }
 ```
 
-
+## more preprocessing
 ```{r}
 sumContDf <- preproz(contDf); beep(2)
-#write.csv(sumContDf, "sumControls.csv")
+#write.csv(sumContDf, "sumControls_2.csv")
 
-sumDp1Df <- preproz(dp1Df)
-#write.csv(sumDp1Df, 'sumDp1.csv')
+sumDp1Df <- preproz(dp1Df); beep(1)
+#write.csv(sumDp1Df, 'sumDp1_2.csv')
 
 sumDp2Df <- preproz(dp2Df)
-#write.csv(sumDp2Df, 'sumDp2.csv')
+#write.csv(sumDp2Df, 'sumDp2_2.csv')
 
-sumContDf <- read.csv('sumControls.csv')
+sumContDf <- read.csv('sumControls_2.csv')
 sumContDf$X <- NULL
-sumDp1Df <- read.csv('sumDp1.csv')
+sumDp1Df <- read.csv('sumDp1_2.csv')
 sumDp1Df$X <- NULL
 
 
 df <- rbind(sumContDf, sumDp1Df, sumDp2Df)
-#write.csv(df, 'combSumDf.csv')
+write.csv(df, 'combSumDf_2.csv', row.names = F)
 
 
 ####MAKE NEW COLUMN IN SUM DF WITH ID WITH NO V1/V2
 
-df <- read.csv('combSumDf.csv')
-df$X <- NULL
+df <- read.csv('combSumDf_2.csv')
+
 #loading and merges with clinical and demographical data
 demoData <- read.csv("/home/lasse/Desktop/Bachelor/DemClinicalData.csv", sep = ";")
 #removing the chronic depression patients
@@ -205,14 +201,36 @@ demoData$Remission<- ifelse(demoData$mergeID == 'dp25' | demoData$mergeID == 'dp
 
 mergeDf <- merge(df, demoData, by = 'mergeID')
 
+write.csv(mergeDf, 'fullSumDf_2.csv', row.names = F)
 
-#write.csv(mergeDf, 'fullSumDf.csv', row.names = F)
+# noScale <- read.csv('fullSumDf_2.csv')
+# noScale$visit <- str_sub(noScale$id, start= -2)
+# dep1 <- noScale %>%
+#   filter(Diagnosis == 'Depression' & visit == 'v1')
+# 
+# dep2 <- noScale %>%
+#   filter(Diagnosis == 'Depression' & visit == 'v2')
+# 
+# cont <- noScale %>%
+#   filter(Diagnosis == 'Control')
+# 
+# 
+# summary(cont[,142:146])
+# summary(dep1[,142:146])
+# summary(dep2[,142:146])
+
+#scaling variables at dataset level 
+mergeDf <- mergeDf %>%
+  mutate_at(.vars = names(.)[4:146],
+            .funs = scale)
+
+write.csv(mergeDf, 'ScaleSumDf.csv', row.names = F)
 
 
 
 
 ############################# CREATING SUBSETS FOR MODELLING + TRAIN AND TEST SET ################3
-mergeDf <- read.csv('fullSumDf.csv')
+mergeDf <- read.csv('ScaleSumDf.csv')
 
 
 mergeDf$visit <- str_sub(mergeDf$id, start= -2)
@@ -220,28 +238,38 @@ mergeDf$visit <- str_sub(mergeDf$id, start= -2)
 depDf <- mergeDf %>%
   filter(Diagnosis == 'Depression' & visit == 'v1')
 
+#depression at visit 2 = those who experienced remission
+dep2Df <- mergeDf %>% 
+  filter(visit == "v2")
+
+
 set.seed(100)
 # Split in test and training sets (use groupdata2)
-depDfParts <- partition(depDf, p = 0.2, id_col = "id", cat_col = 'Remission')
+depDfParts <- partition(depDf, p = 0.2, id_col = "id")
 
 depDf_test_set <- depDfParts[[1]]
 depDf_train_set <- depDfParts[[2]]
 
 #checking amount of remission in test/training set
-depDf_test_set %>% select(Remission, id) %>% group_by(id) %>% summarize(lol = mean(Remission), n()) %>% kable()
-depDf_train_set %>% select(Remission, id) %>% group_by(id) %>% summarize(lol = mean(Remission), count = n()) %>%   group_by(lol) %>% summarize(sum(count)) %>% kable()
+
+#see which ids in the set + remission and number of windows
+depDf_test_set %>% select(Remission, id) %>% group_by(id) %>% summarize(remission = mean(Remission), n()) %>% kable()
+depDf_test_set %>% select(Remission, id) %>% group_by(id) %>% summarize(remission = mean(Remission), nWindows = n()) %>%   group_by(remission) %>% summarize(sum(nWindows)) %>% kable()
+
+depDf_train_set %>% select(Remission, id) %>% group_by(id) %>% summarize(remission = mean(Remission), n()) %>% kable()
+depDf_train_set %>% select(Remission, id) %>% group_by(id) %>% summarize(remission = mean(Remission), nWindows = n()) %>%   group_by(remission) %>% summarize(sum(nWindows)) %>% kable()
 
 #################### 
-# 23 REMISSION IN TOTAL - 4 IN TEST SET, 19 IN TRAINING   
-# 12 NO REMISSION IN TOTAL - 2 IN TEST SET, 10 IN TRAINING
+# XX REMISSION IN TOTAL - X IN TEST SET, 19 IN TRAINING   
+# XX NO REMISSION IN TOTAL - X IN TEST SET, 10 IN TRAINING
 
-# 180 30 SECONDS WINDOWS WITH REMISSION IN TEST SET - 57 30 SECONDS WINDOWS WITH NO REMISSION
-# 617 30 SECOND WINDOWS WITH REMISSION IN TRAINING SET - 244 30 SECONDS WINDOWS WITH NO REMISSION
+# XX 30 SECONDS WINDOWS WITH REMISSION IN TEST SET - XX 30 SECONDS WINDOWS WITH NO REMISSION
+# XX 30 SECOND WINDOWS WITH REMISSION IN TRAINING SET - XX 30 SECONDS WINDOWS WITH NO REMISSION
 
 ####################
 # Write to files
-#write.csv(depDf_test_set, "depDf_test.csv")
-#write.csv(depDf_train_set, "depDf_train.csv")
+#write.csv(depDf_test_set, "depDf_test.csv", row.names = F)
+#write.csv(depDf_train_set, "depDf_train.csv", row.names = F)
 
 
 #subset only for controls and dp_v1
@@ -250,7 +278,7 @@ contDepDf <- mergeDf %>%
 
 contDepDf$DiagnosisInteger <- ifelse(contDepDf$Diagnosis == "Depression", 1, 0)
 # Split in test and training sets (use groupdata2)
-contDepParts <- partition(contDepDf, p = 0.2, id_col = "id", cat_col = 'Diagnosis')
+contDepParts <- partition(contDepDf, p = 0.2, id_col = "id")
 
 contDep_test_set <- contDepParts[[1]]
 contDep_train_set <- contDepParts[[2]]
@@ -258,22 +286,22 @@ contDep_train_set <- contDepParts[[2]]
 
 
 #checking amount of diagnosis in test/training set
-contDep_train_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(diagnosis = mean(DiagnosisInteger), n()) %>% kable()
+contDep_train_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(diagnosis = mean(DiagnosisInteger), count = n()) %>%   group_by(diagnosis) %>% summarize(sum(count)) %>% kable()
 
-contDep_test_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(lol = mean(DiagnosisInteger), count = n()) %>%   group_by(lol) %>% summarize(sum(count)) %>% kable()
+contDep_test_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(diagnosis = mean(DiagnosisInteger), count = n()) %>%   group_by(diagnosis) %>% summarize(sum(count)) %>% kable()
 
 
 #################### 
-# 35  DIAGNOSIS IN TOTAL - 7 IN TEST SET, 28 IN TRAINING   
-# 20 NO DIAGNOSIS IN TOTAL - 4 IN TEST SET, 16 IN TRAINING
+# XX  DIAGNOSIS IN TOTAL - X IN TEST SET, 28 IN TRAINING   
+# XX NO DIAGNOSIS IN TOTAL - X IN TEST SET, 16 IN TRAINING
 
-# 220 30 SECONDS WINDOWS WITH DEPRESSION IN TEST SET - 63 30 SECONDS WINDOWS WITH NO DEPRESSION
-# 878 30 SECOND WINDOWS WITH DEPRESSION IN TRAINING SET - 305 30 SECONDS WINDOWS WITH NO DEPRESSION
+# XX 30 SECONDS WINDOWS WITH DEPRESSION IN TEST SET - 63 30 SECONDS WINDOWS WITH NO DEPRESSION
+# XX 30 SECOND WINDOWS WITH DEPRESSION IN TRAINING SET - 305 30 SECONDS WINDOWS WITH NO DEPRESSION
 
 ####################
 # Write to files
-write.csv(contDep_test_set, "contDep_test.csv")
-write.csv(contDep_train_set, "contDep_train.csv")
+#write.csv(contDep_test_set, "contDep_test.csv", row.names = F)
+#write.csv(contDep_train_set, "contDep_train.csv", row.names = F)
 ```
 
 
@@ -282,11 +310,12 @@ Preparing the elastic net
 
 #################### MODEL 1 - DIAGNOSIS FROM VOICE ###############
 contDep <- read.csv("contDep_train.csv")
-remove <- c("X", "Diagnosis2", "temp", "Education", "HamD6_Before", "HamD17_Before", "HamD6_After", "HamD17_After",
+remove <- c("Diagnosis2", "temp", "Education", "HamD6_Before", "HamD17_Before", "HamD6_After", "HamD17_After",
             "ExecutiveFunctionIED", "ExecutiveFunctionOTS", "SustainedAttention", "WorkingMemory", "VerbalMemory", "IQ", "Age")
 contDep[, remove] <- NULL
 
 contDep$Gender <- ifelse(contDep$Gender == "f", 1, 0)
+contDep$Gender <- as.factor(contDep$Gender)
 
 #changing the order of columns
 contDep <- arrange.vars(contDep, c("id"=151, "mergeID"=150, ".groups"=152, "Gender" = 144))
@@ -296,17 +325,20 @@ xContDep <- contDep[, -c(144:152)] #change to the values in the set
 
 #creating outcome variable
 yContDep <- select(contDep, DiagnosisInteger) 
+yContDep$DiagnosisInteger <- as.factor(yContDep$DiagnosisInteger)
 
 #check for NA
 identical(xContDep, xContDep[complete.cases(xContDep),])
 
 #################### MODEL 2 - REMISSION FROM VOICE ###############
 dep <- read.csv('depDf_train.csv')
-remove <- c("X", "Diagnosis2", "temp", "Education", "HamD6_Before", "HamD17_Before", "HamD6_After", "HamD17_After",
+remove <- c("Diagnosis2", "temp", "Education", "HamD6_Before", "HamD17_Before", "HamD6_After", "HamD17_After",
             "ExecutiveFunctionIED", "ExecutiveFunctionOTS", "SustainedAttention", "WorkingMemory", "VerbalMemory", "IQ", "Age")
 dep[, remove] <- NULL
 
 dep$Gender <- ifelse(dep$Gender == "f", 1, 0)
+dep$Gender <- as.factor(dep$Gender)
+
 
 #changing the order of columns
 dep <- arrange.vars(dep, c("id"=151, "mergeID"=150, ".groups"=149, "Gender" = 144))
@@ -318,6 +350,8 @@ xDep <- dep[, -c(144:151)] #change to the values in the set
 
 #creating outcome variable
 yDep <- select(dep, Remission) 
+yDep$Remission <- as.factor(yDep$Remission)
+
 
 #check for NA
 identical(xDep, xDep[complete.cases(xDep),])
@@ -334,10 +368,6 @@ xDep <- model.matrix(~.-1, data= xDep)
 yContDep <- as.numeric(unlist(yContDep))
 yDep <- as.numeric(unlist(yDep))
 
-
-#scale all features
-#xContDep <- scale(xContDep)[,]
-#xDep <- scale(xDep)[,]
 
 
 #function to run the elastic net. First chooses the optimal alpha, then runs the elastic net
@@ -368,6 +398,7 @@ elasticfun <- function(y, x){
   names(coefs)[1] <- "betas"
   coefs=subset(coefs,betas!=0)
   coefs1=coefs[order(abs(coefs$betas)),]
+  coefs1$alpha = alpha1
   return(coefs1)
 }
 
@@ -375,7 +406,9 @@ elasticfun <- function(y, x){
 contDepNet <- elasticfun(yContDep, xContDep)
 depNet <- elasticfun(yDep, xDep)
 
+contDepNet$betas <- round(contDepNet$betas, 4)
 contDepNet
+depNet$betas <- round(depNet$betas, 4)
 depNet
 # #saving values
 save(contDepNet, file = "contDepNet.RData")
@@ -383,32 +416,640 @@ save(depNet, file = "depNet.RData")
 ```
 
 
+## density plots
+```{r}
+#### COOL DENSITY PLOTS
+dep %>% 
+  select_if(is.numeric) %>% 
+  #select(depPredictors[54:62]) %>%
+  gather(metric, value) %>% 
+  ggplot(aes(value, fill = metric)) + 
+  geom_density(show.legend = FALSE) + 
+  facet_wrap(~ metric, scales = "free")
+
+dep %>% 
+  select(depPredictors) %>% 
+  #select(depPredictors[54:62]) %>%
+  gather(metric, value) %>% 
+  ggplot(aes(value, fill = metric)) + 
+  geom_density(show.legend = FALSE) + 
+  facet_wrap(~ metric, scales = "free")
+
+
+##also make for contDep
+```
+
+
 Bayesian logistic models
 ```{r}
+load('depNet.RData')
+
+preds <- depNet %>% 
+  filter(abs(betas) > 0.1)
+depPredictors <- preds$predictors
+
+#removing intercept 
+depPredictors <- depPredictors[-length(depPredictors)]
+
+depFormula <- dep %>%
+  select(depPredictors, Remission, id)
+
+#soooo many predictors
+depLogistic <- brm(Remission ~ MCEP_22_IQR +HMPDM_20_median + MCEP_11_median + MDQ_median + HMPDM_18_median + HMPDD_3_median + 
+MCEP_4_median + MCEP_11_IQR + HMPDM_21_IQR + HMPDM_16_median + HMPDM_14_median + MCEP_13_median + 
+HMPDM_20_IQR + VUV_median + sdPauseLength + HMPDD_9_IQR + H1H2_IQR + MCEP_8_IQR + HMPDM_10_IQR +
+HMPDM_23_median + MCEP_1_IQR + HMPDD_7_IQR + HMPDM_12_median + HMPDM_22_IQR + HMPDM_19_IQR + MCEP_1_median +
+MCEP_10_median + MCEP_2_IQR + f0_IQR + HMPDM_19_median + HMPDM_21_median + MCEP_17_IQR + HMPDM_13_median + 
+MCEP_20_median + medianPauseLength + F4_median + MCEP_7_IQR + HMPDM_17_median + HRF_median + Rd_conf_median + 
+MCEP_2_median + HMPDM_22_median + HMPDD_6_IQR + peakSlope_median + MCEP_0_IQR + MCEP_17_median + HMPDD_4_IQR +
+MCEP_21_IQR + MCEP_3_median + MCEP_8_median + HMPDD_7_median  + F3_median + MCEP_5_median + MCEP_13_IQR + 
+MCEP_4_IQR +  HMPDD_6_median + MCEP_9_median +  HMPDD_5_median + MCEP_15_median + MCEP_0_median + MCEP_7_median +     MCEP_19_median  +  MCEP_12_median +  (1|id), 
+            data = dep, family = bernoulli(), cores = 4, chains = 4, control = list( adapt_delta = .99, max_treedepth = 12))
+
+
+depLogistic2 <- brm(Remission ~.-id + (1|id), 
+                    data = depFormula, family = bernoulli(), 
+                    cores = 4, chains = 4, 
+                    control = list(adapt_delta = .998, max_treedepth = 15))
+depLogistic2
+
+save(depLogistic, file = 'depLogistic.RData')
+
+summary(depLogistic)
+
+#load test data
+depTest <- read.csv("depDf_test.csv")
+
+predict(depLogistic, newdata = depTest)
+
+preddf$predNeutral = predict(neutralFitFull, preddf, re_formula = NA)[,1]
+
+
+validation$PredictionsPerc=predict(model, validation)
+ validation$Predictions = NA
+ validation$Predictions[validation$PredictionsPerc<0.00]="Control"
+ validation$Predictions[validation$PredictionsPerc>=0.00]="Schizophrenia"
+ 
+ confusion = confusionMatrix(data = validation$Predictions, reference = validation$Diagnosis, positive = "Schizophrenia")
+
+
+#calculating confusion matrix
+conf = confusionMatrix(data = preddf$predictions, reference = preddf$emotion)
+conf
 
 ```
 
-SVM models
+controls for caret's train function
 ```{r}
-# remember to tune and optimize https://www.r-bloggers.com/machine-learning-using-support-vector-machines/
-# non linear svm? https://machinelearningmastery.com/non-linear-regression-in-r/ 
-#                 https://stats.stackexchange.com/questions/10551/how-do-i-choose-what-svm-kernels-to-use
+## For accuracy, Kappa, the area under the ROC curve, sensitivity and specificity:
+fiveStats <- function(...) c(twoClassSummary(...), 
+                             defaultSummary(...))
+## Everything but the area under the ROC curve:
+fourStats <- function (data, lev = levels(data$obs), model = NULL) {
+  accKapp <- postResample(data[, "pred"], data[, "obs"])
+  out <- c(accKapp,
+           sensitivity(data[, "pred"], data[, "obs"], lev[1]),
+           specificity(data[, "pred"], data[, "obs"], lev[2]))
+  names(out)[3:4] <- c("Sens", "Spec")
+  out
+}
+
+#Two control functions are developed for situations when class probabilities can be created and when they cannot:
+#(class probabilities can not be created when classes are weighted)
+ctrl <- trainControl(method = "cv", 
+                     classProbs = TRUE,
+                     summaryFunction = fiveStats,
+                     verboseIter = TRUE)
+
+ctrlNoProb <- trainControl(method = "cv", 
+                     classProbs = FALSE,
+                     summaryFunction = fourStats,
+                     verboseIter = TRUE)
 
 ```
 
-Random forest (adaboost or xgboost?)
+
+#SVM models
+```{r predicting remission}
+############################# LINEAR SVM ¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤
+set.seed(60)
+
+#grid search for optimal cost parameter
+grid <- expand.grid(C = 2^(seq(-4,4)))
+#training SVM
+dep$Remission <- as.factor(dep$Remission)
+dep$nPauses <- as.numeric(dep$nPauses)
+
+
+levels(dep$Remission) <- c("NoRemission", "Remission")
+
+### Linear svm no class weights
+svmLinNoWeights <- train(x = dep[,depPredictors], y = dep$Remission,
+                    method = "svmLinear",
+                    metric = "ROC",
+                    trControl=ctrl,
+                    tuneGrid = grid,
+                    tuneLength = 10)
+
+svmLinNoWeights
+
+
+### Linear svm with class weights
+svmLinWeighted <- train(x = dep[,depPredictors], y = dep$Remission,
+                    method = "svmLinear",
+                    metric = "Kappa",
+                    trControl=ctrlNoProb,
+                    tuneGrid = grid,
+                    tuneLength = 10, 
+                    class.weights = c(NoRemission = 1, Remission = 15))
+
+svmLinWeighted
+############################# RBF SVM ¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤
+#finding optimal sigma and cost parameters
+sigmaRange <- sigest(as.matrix(dep[,depPredictors]))
+svmRGrid2 <- expand.grid(.sigma = sigmaRange, .C = 2^(seq(-4, 4)))
+#### no class weights
+svmRbfNoWeights <- train(dep[,depPredictors], dep$Remission, 
+                   method = "svmRadial", 
+                   metric = "ROC", 
+                   tuneGrid = svmRGrid2, 
+                   trControl = ctrl)
+svmRbfNoWeights
+
+#### with class weights
+svmRbfWeighted <- train(dep[,depPredictors], dep$Remission, 
+                   method = "svmRadial", 
+                   metric = "Kappa", 
+                   tuneGrid = svmRGrid2, 
+                   trControl = ctrlNoProb,
+                   class.weights = c(NoRemission = 1, Remission = 15))
+svmRbfWeighted
+
+
+
+
+
+
+## see how many id were predicted correctly / the predicted probability of remission
+linTest <- depTest %>%
+  select(id, PredictionsLinear, PredictionsRbf, Remission) 
+
+linTest$PredictionsLinear = as.numeric(ifelse(linTest$PredictionsLinear == "NoRemission", 0, 1))
+linTest$PredictionsRbf = as.numeric(ifelse(linTest$PredictionsRbf == "NoRemission", 0, 1))
+linTest$Remission = as.numeric(ifelse(linTest$Remission == "NoRemission", 0, 1))
+
+sumLin <- linTest %>%
+  group_by(id) %>%
+  summarise(LinearProb = mean(PredictionsLinear), RbfProb = mean(PredictionsRbf), Remission = mean(Remission))
+#pretty bad....
+
+##better probabilities:
+depTest$PredictionsRbf <- predict(svmRModel, newdata = depTest[,depPredictors], type = 'prob')$Remission
+depTest$PredictionsLinear <- predict(svm_Linear, newdata = depTest[,depPredictors], type = 'prob')$Remission
+
+
+
+probRemission <- depTest %>%
+  select(id, PredictionsLinear, PredictionsRbf, Remission)
+probRemission$Remission = as.numeric(ifelse(probRemission$Remission == "NoRemission", 0, 1))
+
+sumProb <- probRemission %>%
+  group_by(id) %>%
+  summarise(LinearProb = mean(PredictionsLinear), RbfProb = mean(PredictionsRbf), Remission = mean(Remission))
+
+
+sumProb
+#super bad
+
+
+###AUC and stuff
+#can only create ROC curves for unweighted since the weighted models can only classify
+evalResults <- data.frame(Remission = depTest$Remission)
+evalResults$SVMLinNoWeights <- predict(svmLinNoWeights, newdata = depTest[,depPredictors], type = 'prob')[,1]
+evalResults$SVMRbfNoWeights <- predict(svmRbfNoWeights, newdata = depTest[,depPredictors], type = 'prob')[,1]
+
+#calculating AUC and creating ROC curves
+SVMLinNoWeightsROC <- roc(evalResults$Remission, evalResults$SVMLinNoWeights, levels = rev(levels(evalResults$Remission)))
+SVMLinNoWeightsROC
+
+SVMRbfNoWeightsROC <- roc(evalResults$Remission, evalResults$SVMRbfNoWeights, levels = rev(levels(evalResults$Remission)))
+SVMRbfNoWeightsROC
+
+#To plot the curves:
+par(pty="s")
+plot(SVMLinNoWeightsROC, legacy.axes = TRUE, col = 'black')
+plot(SVMRbfNoWeightsROC, legacy.axes = TRUE, add = T, col = 'red')
+
+
+#trying to find optimal decision threshold (based on AUC)
+SVMLinThresh <- coords(SVMLinNoWeightsROC, x = "best", best.method = "closest.topleft")
+SVMLinThresh
+
+SVMRbfThresh <- coords(SVMRbfNoWeightsROC, x = "best", best.method = "closest.topleft")
+SVMRbfThresh
+
+#using the newly calculated thresholds to classify 
+evalResults$SVMLinNoWeightsPred <- factor(ifelse(evalResults$SVMLinNoWeights < SVMLinThresh[1], "Remission", "NoRemission"), levels = levels(evalResults$Remission))
+
+evalResults$SVMRbfNoWeightsPred <- factor(ifelse(evalResults$SVMRbfNoWeights < SVMRbfThresh[1], "Remission", "NoRemission"), levels = levels(evalResults$Remission))
+
+
+#confusion matrices with new thresholds
+confusionMatrix(data = evalResults$SVMLinNoWeightsPred, reference = evalResults$Remission, positive = "Remission")
+
+confusionMatrix(data = evalResults$SVMLinWeighted, reference = evalResults$Remission, positive = "Remission")
+
+confusionMatrix(data = evalResults$SVMRbfNoWeightsPred, reference = evalResults$Remission, positive = "Remission")
+
+confusionMatrix(data = evalResults$SVMRbfWeighted, reference = evalResults$Remission, positive = "Remission")
+
+#### ^^ IS THIS CHEATING?  TRAIN THRESHOLD ON TRAIN DATA INSTEAD???
+```
+
+
+```{r  svm predicting diagnosis}
+############################# LINEAR SVM ¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤
+load('contDepNet.RData')
+
+contPreds <- contDepNet %>% 
+  filter(abs(betas) > 0.1)
+contDepPredictors <- contPreds$predictors
+
+#removing intercept 
+contDepPredictors <- contDepPredictors[-length(contDepPredictors)]
+
+set.seed(60)
+
+
+ctrl <- trainControl(method = "LGOCV", #1leave group out cv
+                     summaryFunction = twoClassSummary, #use AUC to pick best model
+                     classProbs = T)                    #output probabilities not only classification
+
+#grid search for optimal cost parameter
+grid <- expand.grid(C = 2^(seq(-4,4)))
+#training SVM
+contDep$Diagnosis <- as.factor(contDep$Diagnosis)
+
+svm_Linear <- train(x = contDep[,contDepPredictors], y = contDep$Diagnosis,
+                    method = "svmLinear",
+                    metric = "ROC",
+                    trControl=ctrl,
+                    tuneGrid = grid,
+                    tuneLength = 10, 
+                    class.weights = c(Control = 1, Depression = 15))
+
+svm_Linear
+############################# RBF SVM ¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤
+
+#finding optimal signma and cost parameters
+sigmaRange <- sigest(as.matrix(contDep[,contDepPredictors]))
+svmRGrid <- expand.grid(.sigma = sigmaRange[1], .C = 2^(seq(-4, 4)))
+
+
+svmRModel <- train(contDep[,contDepPredictors], contDep$Diagnosis, 
+                   method = "svmRadial", 
+                   metric = "ROC", 
+                   tuneGrid = svmRGrid, 
+                   trControl = ctrl, 
+                   class.weights = c(Control = 1, Depression = 15))
+svmRModel
+
+############################# TESTING PERFORMANCE #######################
+contDepTest <- read.csv("contDep_test.csv")
+
+
+#### LINEAR
+contDepTest$Diagnosis <- ifelse(depTest$Remission == 0, 'NoRemission', 'Remission')
+
+contDepTest$PredictionsLinear <- predict(svm_Linear, newdata = contDepTest[,contDepPredictors])
+
+confusionMatrix(data = contDepTest$PredictionsLinear, reference = contDepTest$Diagnosis, positive = "Depression")
+
+
+#### RBF
+contDepTest$PredictionsRbf <- predict(svmRModel, newdata = contDepTest[,contDepPredictors])
+
+confusionMatrix(data = contDepTest$PredictionsRbf, reference = contDepTest$Diagnosis, positive = "Depression")
+
+
+########## CHANGE VARIABLES TO THE CORRECT ONES ##################################
+
+## see how many id were predicted correctly / the predicted probability of remission
+linTest <- contDepTest %>%
+  select(id, PredictionsLinear, PredictionsRbf, Remission) 
+
+linTest$PredictionsLinear = as.numeric(ifelse(linTest$PredictionsLinear == "NoRemission", 0, 1))
+linTest$PredictionsRbf = as.numeric(ifelse(linTest$PredictionsRbf == "NoRemission", 0, 1))
+linTest$Remission = as.numeric(ifelse(linTest$Remission == "NoRemission", 0, 1))
+
+sumLin <- linTest %>%
+  group_by(id) %>%
+  summarise(LinearProb = mean(PredictionsLinear), RbfProb = mean(PredictionsRbf), Remission = mean(Remission))
+#pretty bad....
+
+##better probabilities:
+depTest$PredictionsRbf <- predict(svmRModel, newdata = depTest[,depPredictors], type = 'prob')$Remission
+depTest$PredictionsLinear <- predict(svm_Linear, newdata = depTest[,depPredictors], type = 'prob')$Remission
+
+
+
+probRemission <- depTest %>%
+  select(id, PredictionsLinear, PredictionsRbf, Remission)
+probRemission$Remission = as.numeric(ifelse(probRemission$Remission == "NoRemission", 0, 1))
+
+sumProb <- probRemission %>%
+  group_by(id) %>%
+  summarise(LinearProb = mean(PredictionsLinear), RbfProb = mean(PredictionsRbf), Remission = mean(Remission))
+
+
+sumProb
+#super bad
+```
+
+
+#Random forest
 ```{r}
+rf <- train(x = dep[,depPredictors], y = dep$Remission,
+                    method = "rf",
+                    metric = "ROC",
+                    trControl=ctrl)
+
+depTest$rf <- predict(rf, newdata = depTest[,depPredictors])
+
+confusionMatrix(data = depTest$rf, reference = depTest$Remission, positive = "Remission")
+#everything is remission
+##try up/downsampling?
+
+### change threshold????? 
 
 ```
+
+
+#XGboost!
+```{r}
+#following this tutorial: https://www.kaggle.com/pelkoja/visual-xgboost-tuning-with-caret
+
+# #tuneable parameters:
+#     nrounds: Number of trees, default: 100
+#     max_depth: Maximum tree depth, default: 6
+#     eta: Learning rate, default: 0.3
+#     gamma: Used for tuning of Regularization, default: 0
+#     colsample_bytree: Column sampling, default: 1
+#     min_child_weight: Minimum leaf weight, default: 1
+#     subsample: Row sampling, default: 1
+
+#### Fitting baseline xgboost with default parameters
+grid_default <- expand.grid(
+  nrounds = 100,
+  max_depth = 6,
+  eta = 0.3,
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+train_control <- caret::trainControl(
+  method = "none",
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgbBase <- train(x = dep[,depPredictors], y = dep$Remission,
+                 trControl = ctrl,
+                 tuneGrid = grid_default,
+                 method = "xgbTree",
+                 verbose = TRUE
+)
+
+xgbBase
+
+############TUNING PARAMETERS
+# start nrounds from 200, as smaller learning rates result in errors so large with lower starting points that they'll mess the scales
+tune_grid <- expand.grid(
+  nrounds = seq(from = 200, to = 1000, by = 50), #max treedepth 1000 to get a reasonable running time while testing hyperparameter combinations
+  eta = c(0.025, 0.05, 0.1, 0.3), #rule of thumb [2-10]/#trees
+  max_depth = c(2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+tune_control <-trainControl(
+  method = "cv", # cross-validation
+  number = 3, # with n folds 
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgbTune <- train(x = dep[,depPredictors], y = dep$Remission,
+                 trControl = tune_control,
+                 tuneGrid = tune_grid,
+                 method = "xgbTree",
+                 verbose = TRUE
+)
+
+xgbTune
+
+# helper function to plot results
+tuneplot <- function(x, probs = .90) {
+  ggplot(x) +
+    coord_cartesian(ylim = c(quantile(x$results$Accuracy, probs = probs), min(x$results$Accuracy))) +
+    theme_bw()
+}
+tuneplot(xgbTune)
+xgbTune$bestTune
+
+##with 1000 iterations an eta (learning rate) of 0.3 seems to be a good starting point, though they are all very close 
+
+###Finding optimal max_depth and min_child_weight
+#fixing the learning rate to 0.3 setting maximum depth to 2 (best from previous model) to 4 to experiment a bit around the suggested best tune in previous step. Then, well fix maximum depth and minimum child weight:
+
+tune_grid2 <- expand.grid(
+  nrounds = seq(from = 50, to = 1000, by = 50),
+  eta = xgbTune$bestTune$eta,
+  max_depth = c(xgbTune$bestTune$max_depth:4),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = c(1, 2, 3),
+  subsample = 1
+)
+
+xgbTune2 <- train(x = dep[,depPredictors], y = dep$Remission,
+  trControl = tune_control,
+  tuneGrid = tune_grid2,
+  method = "xgbTree",
+  verbose = TRUE
+)
+xgbTune2
+tuneplot(xgbTune2)
+xgbTune2$bestTune
+
+####Tuning row and column sampling
+tune_grid3 <- expand.grid(
+  nrounds = seq(from = 50, to = 1000, by = 50),
+  eta = xgbTune$bestTune$eta, #still 0.3
+  max_depth = xgbTune2$bestTune$max_depth,  #found to be 4
+  gamma = 0,
+  colsample_bytree = c(0.4, 0.6, 0.8, 1.0),
+  min_child_weight = xgbTune2$bestTune$min_child_weight, #found to be 1
+  subsample = c(0.5, 0.75, 1.0)
+)
+
+xgbTune3 <- train(x = dep[,depPredictors], y = dep$Remission,
+  trControl = tune_control,
+  tuneGrid = tune_grid3,
+  method = "xgbTree",
+  verbose = TRUE
+)
+
+tuneplot(xgbTune3, probs = .95)
+xgbTune3$bestTune
+
+####Tuning gamma
+tune_grid4 <- expand.grid(
+  nrounds = seq(from = 50, to = 1000, by = 50),
+  eta = xgbTune$bestTune$eta,
+  max_depth = xgbTune2$bestTune$max_depth,
+  gamma = c(0, 0.05, 0.1, 0.5, 0.7, 0.9, 1.0), #trying different gamma values
+  colsample_bytree = xgbTune3$bestTune$colsample_bytree,
+  min_child_weight = xgbTune2$bestTune$min_child_weight,
+  subsample = xgbTune3$bestTune$subsample
+)
+
+xgbTune4 <-train(x = dep[,depPredictors], y = dep$Remission,
+  trControl = tune_control,
+  tuneGrid = tune_grid4,
+  method = "xgbTree",
+  verbose = TRUE
+)
+
+tuneplot(xgbTune4)
+xgbTune4$bestTune
+
+#Reducing learning rate (eta)  to find the final model
+tune_grid5 <- expand.grid(
+  nrounds = seq(from = 100, to = 10000, by = 100), #upping treedepth to 10000
+  eta = c(0.01, 0.015, 0.025, 0.05, 0.1),
+  max_depth = xgbTune2$bestTune$max_depth,
+  gamma = xgbTune4$bestTune$gamma,
+  colsample_bytree = xgbTune3$bestTune$colsample_bytree,
+  min_child_weight = xgbTune2$bestTune$min_child_weight,
+  subsample = xgbTune3$bestTune$subsample
+)
+
+xgbTune5 <- train(x = dep[,depPredictors], y = dep$Remission,
+  trControl = tune_control,
+  tuneGrid = tune_grid5,
+  method = "xgbTree",
+  verbose = TRUE
+)
+
+tuneplot(xgbTune5)
+xgbTune5$bestTune
+
+###### Final model
+final_grid <- expand.grid(
+  nrounds = xgbTune5$bestTune$nrounds,
+  eta = xgbTune5$bestTune$eta,
+  max_depth = xgbTune5$bestTune$max_depth,
+  gamma = xgbTune5$bestTune$gamma,
+  colsample_bytree = xgbTune5$bestTune$colsample_bytree,
+  min_child_weight = xgbTune5$bestTune$min_child_weight,
+  subsample = xgbTune5$bestTune$subsample
+)
+
+xgbFit <- train(x = dep[,depPredictors], y = dep$Remission,
+  trControl = train_control,
+  tuneGrid = final_grid,
+  method = "xgbTree",
+  verbose = TRUE
+)
+
+xgbFit
+
+
+############ testing performance
+#### baseline xgboost with default parameters
+
+
+## pretty decent!
+
+
+##### default parameters were better. Probably due tothe insanely high testing accuracies making it difficult to tune
+
+```
+
 
 Naive Bayes
 ```{r}
+#http://uc-r.github.io/naive_bayes   <- nice tutorial 
+####### Predicting remission
 
+#tuning grid
+grid <- expand.grid(fL=seq(0,1, 0.1), 
+                    usekernel = TRUE, 
+                    adjust=seq(0,1,0.1))
+
+grid2 <- expand.grid(
+  usekernel = c(TRUE, FALSE),
+  fL = seq(0,2, 0.2),
+  adjust = seq(0, 2, by = 0.2)
+)
+
+
+#usekernel parameter allows us to use a kernel density estimate for continuous variables versus a guassian density estimate,
+#adjust allows us to adjust the bandwidth of the kernel density (larger numbers mean more flexible density estimate),
+#fL allows us to incorporate the Laplace smoother. (adding a small number to each of the counts in the frequencies for each feature, which ensures that each feature has a nonzero probability of occuring for each class)
+nbRemissionGrid1 <- train(x = dep[,depPredictors],y = dep$Remission,
+              method = 'nb',
+              trControl = ctrl,
+              prior = c(0.5, 0.5), #setting equal priors to try to deal with uneven class size
+              metric = "ROC", 
+              tuneGrid = grid,
+              tuneLength = 10) 
+
+
+
+nbRemissionGrid2 <- train(x = dep[,depPredictors],y = dep$Remission,
+              method = 'nb',
+              trControl = ctrl,
+              metric = "ROC", 
+              tuneGrid = grid2,
+              tuneLength = 10) 
+
+
+plot(nbRemissionGrid1)
+
+nbRemissionGrid1$results %>% 
+  top_n(5, wt = ROC) %>%
+  arrange(desc(ROC))
+
+plot(nbRemission)
+
+#confusion matrix
+
+
+#not super impressive
+
+### SETTING PRIORS? doesn't seem to do much..
 ```
 
-Nearest neighbors
+K-Nearest neighbors
 ```{r}
 
+knnFit <- train(dep[,depPredictors], dep$Remission, 
+                method = "knn", 
+                metric = "ROC", 
+                tuneGrid = data.frame(.k = c(4*(0:5)+1, 20*(1:5)+1,50*(2:9)+1)),
+                trControl = ctrl)
+
+
+plot(knnFit)
+knnFit
+
+#pretty good!!
 ```
 
 Ensemble
@@ -416,5 +1057,88 @@ Ensemble
 
 ```
 
+Predictions and performance
+```{r}
+############################# TESTING PERFORMANCE - REMISSION DATA #######################
+depTest <- read.csv("depDf_test.csv")
+
+
+#### Recoding factor levels
+depTest$Remission <- ifelse(depTest$Remission == 0, 'NoRemission', 'Remission')
+depTest$Remission <- as.factor(depTest$Remission)
+
+#making new dataframe to hold only predictions
+depResults <- data.frame(Remission = depTest$Remission)
+
+#adding predictions
+#svm models
+depResults$svmLinNoWeights <- predict(svmLinNoWeights, newdata = depTest[,depPredictors])
+depResults$svmLinNoWeightsProb <- predict(svmLinNoWeights, newdata = depTest[,depPredictors], type = 'prob')$Remission
+depResults$svmLinWeighted <- predict(svmLinWeighted, newdata = depTest[,depPredictors])
+
+depResults$svmRbfNoWeights <- predict(svmRbfNoWeights, newdata = depTest[,depPredictors])
+depResults$svmRbfNoWeightsProb <- predict(svmRbfNoWeights, newdata = depTest[,depPredictors], type = 'prob')$Remission
+depResults$svmRbfWeighted <- predict(svmRbfWeighted, newdata = depTest[,depPredictors])
+#random forest
+depResults$rf <- predict(rf, newdata = depTest[,depPredictors])
+depResults$rfProp <- predict(rf, newdata = depTest[,depPredictors], type = 'prob')$Remission
+#xgboost models
+depResults$xgbBase <- predict(xgbBase, newdata = depTest[,depPredictors])
+depTest$xgbBaseProp <- predict(xgbBase, newdata = depTest[,depPredictors], type = 'prob')$Remission
+depResults$xgbFit <- predict(xgbFit, newdata = depTest[,depPredictors])
+depTest$xgbFitProp <- predict(xgbFit, newdata = depTest[,depPredictors], type = 'prob')$Remission
+#naive bayes
+depResults$NaiveBayes <- predict(nbRemissionGrid1, newdata = depTest[,depPredictors])  
+depTest$NaiveBayesProp <- predict(nbRemissionGrid1, newdata = depTest[,depPredictors], type = 'prob')$Remission
+#knn
+depResults$knn <- predict(knnFit, newdata = depTest[,depPredictors])
+depTest$knnProp <- predict(knnFit, newdata = depTest[,depPredictors], type = 'prob')$Remission
+
+
+
+
+
+#confusion matrices
+confusionMatrix(data = depTest$knn, reference = depTest$Remission, positive = "Remission")
+confusionMatrix(data = depTest$NaiveBayes, reference = depTest$Remission, positive = "Remission")
+confusionMatrix(data = depTest$xgbFit, reference = depTest$Remission, positive = "Remission")
+confusionMatrix(data = depTest$PredictionsLinear, reference = depTest$Remission, positive = "Remission")
+confusionMatrix(data = depTest$xgbBase, reference = depTest$Remission, positive = "Remission")
+confusionMatrix(data = depTest$PredictionsRbf, reference = depTest$Remission, positive = "Remission")
+
+#auc and ROC curves
+SVMLinNoWeightsROC <- roc(evalResults$Remission, evalResults$SVMLinNoWeights, levels = rev(levels(evalResults$Remission)))
+SVMLinNoWeightsROC
+
+SVMRbfNoWeightsROC <- roc(evalResults$Remission, evalResults$SVMRbfNoWeights, levels = rev(levels(evalResults$Remission)))
+SVMRbfNoWeightsROC
+
+rfROC <- roc(depTest$Remission, depTest$rfProp, levels = rev(levels(depTest$Remission)))
+rfROC
+
+xgbBaseROC <- roc(depTest$Remission, depTest$xgbBaseProp, levels = rev(levels(depTest$Remission)))
+xgbBaseROC
+
+xgbFitROC <- roc(depTest$Remission, depTest$xgbFitProp, levels = rev(levels(depTest$Remission)))
+xgbFitROC
+
+NaiveBayesROC <- roc(depTest$Remission, depTest$NaiveBayesProp, levels = rev(levels(depTest$Remission)))
+NaiveBayesROC
+
+knnROC <- roc(depTest$Remission, depTest$knnProp, levels = rev(levels(depTest$Remission)))
+knnROC
+
+
+par(pty="s")
+plot(SVMLinNoWeightsROC, legacy.axes = TRUE, col = 'black')
+plot(SVMRbfNoWeightsROC, legacy.axes = TRUE, add = T, col = 'red')
+plot(rfROC, legacy.axes = TRUE, col = 'black')
+plot(xgbFitROC, legacy.axes = TRUE, col = 'black')
+plot(xgbBaseROC, legacy.axes = TRUE, col = 'black')
+plot(NaiveBayesROC, legacy.axes = TRUE, col = 'black')
+plot(knnROC, legacy.axes = TRUE, col = 'black')
+
+
+```
 
 
