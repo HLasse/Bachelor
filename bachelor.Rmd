@@ -12,7 +12,7 @@ knitr::opts_chunk$set(echo = TRUE)
 #working directory and packages
 ```{r}
 setwd("~/Desktop/Bachelor/Autobiographic/")
-p_load(stringr, beepr, groupdata2, glmnet, brms, caret, kernlab, klaR, glmnet, tidyverse, knitr, pROC, randomForest, xgboost)
+p_load(stringr, beepr, groupdata2, glmnet, brms, caret, kernlab, klaR, tidyverse, knitr, pROC, randomForest, xgboost)
 ```
 
 
@@ -1073,7 +1073,6 @@ depWeightedModels <- list(svmLinWeighted = svmDepLinWeighted,
 depModelList <- c(depModelListProps, depWeightedModels)
 
 #adding predictions to df
-#### do this prettier...
 predictFun <- function(model, data, type = 'prob'){
   if(type == 'prob'){
   pred <- predict(model, newdata = data, type = "prob")$Remission
