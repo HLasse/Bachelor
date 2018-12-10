@@ -242,6 +242,7 @@ depDf <- mergeDf %>%
 dep2Df <- mergeDf %>% 
   filter(visit == "v2")
 
+write.csv(dep2Df, 'depVisit2.csv', row.names = F)
 
 set.seed(100)
 # Split in test and training sets (use groupdata2)
@@ -284,10 +285,12 @@ contDep_test_set <- contDepParts[[1]]
 contDep_train_set <- contDepParts[[2]]
 
 
-
 #checking amount of diagnosis in test/training set
+
 contDep_train_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(diagnosis = mean(DiagnosisInteger), count = n()) %>%   group_by(diagnosis) %>% summarize(sum(count)) %>% kable()
 
+
+contDep_test_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(diagnosis = mean(DiagnosisInteger), n()) %>% kable()
 contDep_test_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(diagnosis = mean(DiagnosisInteger), count = n()) %>%   group_by(diagnosis) %>% summarize(sum(count)) %>% kable()
 
 
@@ -307,7 +310,6 @@ contDep_test_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize
 
 Preparing the elastic net
 ```{r elastic net}
-
 #################### MODEL 1 - DIAGNOSIS FROM VOICE ###############
 contDep <- read.csv("contDep_train.csv")
 remove <- c("Diagnosis2", "temp", "Education", "HamD6_Before", "HamD17_Before", "HamD6_After", "HamD17_After",
@@ -359,8 +361,8 @@ identical(xDep, xDep[complete.cases(xDep),])
 ##Running the elastic net
 ```{r}
 ## Define predictors and outcome
-xContDep <- model.matrix(~.-1, data= xContDep) 
-xDep <- model.matrix(~.-1, data= xDep)
+xContDep <- model.matrix(~., data= xContDep) 
+xDep <- model.matrix(~., data= xDep)
 
 
 # makes outcome variables into a non data frame because glmnet doesn’t deal with dataframes
@@ -368,19 +370,24 @@ yContDep <- as.numeric(unlist(yContDep))
 yDep <- as.numeric(unlist(yDep))
 
 
+# nesting folds by id to prevent leakage of information (doesn't seem to work properly - no predictors for dep)
+contDepFolded <- fold(contDep, k = 11, cat_col = "Diagnosis", id_col = "id")
+contDepFolds <- as.numeric(contDepFolded$.folds)
+depFolded <- fold(dep, k = 7, cat_col = "Remission", id_col = "id")
+depFolds <- as.numeric(depFolded$.folds)
+
+
 
 #function to run the elastic net. First chooses the optimal alpha (ie the split between L1 and L2 regularization), then runs the elastic net
-elasticfun <- function(y, x){
+elasticfun <- function(y, x, foldVec){
   alphaslist<-seq(0,1,by=0.1)
-  foldslist<-seq(4,12)
-  pars=expand.grid(alphaslist,foldslist)
 
   cvm1=matrix(rep(0,length(alphaslist)))
 
   elasticnet1<-lapply(1:length(cvm1), 
                   function(a){
                     cv.glmnet(x, y, alpha=alphaslist[a], family="binomial", 
-                                                         lambda.min.ratio=.001,nfolds = 5)})
+                                                         lambda.min.ratio=.001, foldid = foldVec)})
 
   for (i in 1:length(alphaslist)) {cvm1[i]=min(elasticnet1[[i]]$cvm)}
 
@@ -389,7 +396,7 @@ elasticfun <- function(y, x){
   alpha1=alphaslist[n1]
 
 # Run cross-validated elastic net with the chosen alpha (to choose lambda)
-  mod_cv <- cv.glmnet(x=x, y=y, family='binomial', alpha=alpha1, nfolds=5) # Modify family if not binomial
+  mod_cv <- cv.glmnet(x=x, y=y, family='binomial', alpha=alpha1, foldid = foldVec) # Modify family if not binomial
   coefs=as.data.frame(as.matrix(coef(mod_cv, mod_cv$lambda.1se)))
   coefs$predictors<-rownames(coefs)
   rownames(coefs) <- NULL
@@ -401,8 +408,8 @@ elasticfun <- function(y, x){
 }
 
 
-contDepNet <- elasticfun(yContDep, xContDep)
-depNet <- elasticfun(yDep, xDep)
+contDepNet <- elasticfun(yContDep, xContDep, contDepFolds)
+depNet <- elasticfun(yDep, xDep, depFolds)
 
 contDepNet$betas <- round(contDepNet$betas, 4)
 contDepNet
@@ -410,7 +417,7 @@ depNet$betas <- round(depNet$betas, 4)
 depNet
 # #saving values
 save(contDepNet, file = "contDepNet.RData")
-save(depNet, file = "depNet.RData")
+save(depNet, file = "depNetNew.RData")
 ```
 
 
@@ -435,6 +442,1567 @@ dep %>%
 
 ##also make for contDep
 ```
+
+# HYPOTHESIS 1 - PREDICTING DIAGNOSIS
+
+#downsampling depression data, creating folds for cv and creating control statements for caret's train function
+```{r}
+load('contDepNet.RData')
+
+#keeping variables with a beta > 0.00
+preds <- contDepNet %>% 
+  filter(abs(betas) > 0.00)
+contDepPredictors <- preds$predictors
+
+#removing intercept 
+contDepPredictors <- contDepPredictors[-length(contDepPredictors)]
+
+#creating dataframe for models taking formula inputs (like brms)
+contDepFormula <- contDep %>%
+  dplyr::select(contDepPredictors, Diagnosis, id)
+
+
+contDep$Diagnosis <- as.factor(contDep$Diagnosis)
+contDep$nPauses <- as.numeric(contDep$nPauses)
+levels(contDep$Diagnosis) <- c("Control", "Depression")
+
+
+###Downsampling data to have an even number of ids for controls and depression
+contDepDown <- groupdata2::balance(contDep, size="min", cat_col = "Diagnosis", 
+       id_col = "id", id_method = "n_ids")
+#write.csv(contDepDown, 'contDepDown.csv', row.names = F)
+contDepDown <- read.csv('contDepDown.csv')
+
+contDep %>%
+  count(Diagnosis, id) %>%
+  kable()
+
+contDepDown %>% 
+  count(Diagnosis, id) %>% 
+  kable()
+#12 id in each group
+
+#for prettier brms inout
+contDepDownFormula <- contDepDown %>%
+  dplyr::select(contDepPredictors, Diagnosis, id)
+
+litPredictors <- c('nPauses', 'meanPauseLength', 'iqrPauseLength', 'f0_median', 'f0_IQR', 'NAQ_median', 'NAQ_IQR', 'QOQ_median', 'QOQ_IQR', 'HRF_median', 'HRF_IQR', 'H1H2_median', 'H1H2_IQR', 'Rd_median', 'Rd_IQR', 'Rd_conf_median', 'Rd_conf_IQR', 'F1_median', 'F1_IQR', 'F2_median', 'F2_IQR', 'F3_median', 'F3_IQR', 'F4_median', 'F4_IQR', 'F5_median', 'F5_IQR')
+
+litFormula <- contDep %>%
+  dplyr::select(litPredictors, Diagnosis, id)
+
+litDownFormula <- contDepDown %>%
+  dplyr::select(litPredictors, Diagnosis, id)
+  
+#creating folds to use for the index argument in trainControl which respect the groupings in the data
+#ie no ids are present in 2 groups
+contDepDownTrainFold <- groupKFold(contDepDown$id, k = 6) #24 different ids, doing a 6-fold cv (since 24/6 is a nice even 4)
+contDepTrainFold <- groupKFold(contDep$id, k = 11) #44 different ids, doing a 11-fold cv (since 44/11 is a nice even 4)
+
+
+##Control statements for train()
+
+## For accuracy, Kappa, the area under the ROC curve, sensitivity and specificity:
+###### not used - might be useful in another  assignment
+##fiveStats <- function(...) c(twoClassSummary(...), 
+##                             defaultSummary(...))
+
+
+## Everything but the area under the ROC curve:
+#### useful for models which can't make probabilities (such as weighted models) but not used in this assingment
+# fourStats <- function (data, lev = levels(data$obs), model = NULL) {
+#   accKapp <- postResample(data[, "pred"], data[, "obs"])
+#   out <- c(accKapp,
+#            sensitivity(data[, "pred"], data[, "obs"], lev[1]),
+#            specificity(data[, "pred"], data[, "obs"], lev[2]))
+#   names(out)[3:4] <- c("Sens", "Spec")
+#   out
+# }
+
+################### since our data is highly imbalanced it doesn't make much sense to optimize by ROC or accuracy. Instead creating a variable 'Dist' which is the distance from having perfect sensitivity and specificy (ie spec + sens = 2). We are trying to minimize this value. Dist is then the distance from the perfect model
+fourStats <- function (data, lev = levels(data$obs), model = NULL) {
+  out <- c(twoClassSummary(data, lev = levels(data$obs), model = NULL))
+  coords <- matrix(c(1, 1, out["Spec"], out["Sens"]), 
+                   ncol = 2, 
+                   byrow = TRUE)
+  colnames(coords) <- c("Spec", "Sens")
+  rownames(coords) <- c("Best", "Current")
+  c(out, Dist = dist(coords)[1])
+}
+
+
+
+#Two control functions are developed for situations when class probabilities can be created and when they cannot:
+#(class probabilities can not be created when classes are weighted)
+
+#controls for the downsampled df
+contDepDownCtrl <- trainControl(method = "cv", 
+                     classProbs = TRUE,
+                     summaryFunction = fourStats,
+                     verboseIter = TRUE,
+                     index = contDepDownTrainFold,
+                     savePredictions = 'all')
+
+
+#controls for the full df
+contDepCtrl <- trainControl(method = "cv", 
+                     classProbs = TRUE,
+                     summaryFunction = fourStats,
+                     verboseIter = TRUE,
+                     index = contDepTrainFold,
+                     savePredictions = 'all')
+```
+
+#Bayesian logistic models - elastic net features
+```{r}
+priors <- c(set_prior("normal(0,3)", class = "b"), set_prior("normal(0,3)", class = "Intercept"))
+
+
+contDepLogistic <- brm(Diagnosis ~.-id + (1|id), 
+                    data = contDepFormula, family = bernoulli(), 
+                    cores = 4, chains = 4, prior = priors,
+                    control = list(adapt_delta = .998, max_treedepth = 15))
+
+contDepLogistic
+save(contDepLogistic, file = 'contDepLogistic.RData')
+
+plot(roc(contDep$Diagnosis, predict(contDepLogistic)[,1]),
+     print.thres = TRUE)
+#seems a bit overfit.... could use cross-val instead (later)
+
+contDepDownLogistic <- brm(Diagnosis ~.-id + (1|id), 
+                    data = contDepDownFormula, family = bernoulli(), 
+                    cores = 4, chains = 4, prior = priors,
+                    control = list(adapt_delta = .998, max_treedepth = 15))
+
+contDepDownLogistic
+plot(roc(contDepDown$Diagnosis, predict(contDepDownLogistic)[,1]),
+     print.thres = TRUE)
+#same as ^ 
+
+save(contDepDownLogistic, file = 'contDepDownLogistic.RData')
+```
+
+#Bayesian logistic models - features from literature
+```{r}
+priors <- c(set_prior("normal(0,3)", class = "b"), set_prior("normal(0,3)", class = "Intercept"))
+
+
+litLogistic <- brm(Diagnosis ~.-id + (1|id), 
+                    data = litFormula, family = bernoulli(), 
+                    cores = 4, chains = 4, prior = priors,
+                    control = list(adapt_delta = .998, max_treedepth = 15))
+
+litLogistic
+save(litLogistic, file = 'litLogistic.RData')
+
+
+litDownLogistic <- brm(Diagnosis ~.-id + (1|id), 
+                    data = litDownFormula, family = bernoulli(), 
+                    cores = 4, chains = 4, prior = priors,
+                    control = list(adapt_delta = .998, max_treedepth = 15))
+
+litDownLogistic
+
+save(litDownLogistic, file = 'litDownLogistic.RData')
+```
+
+#SVM models - elastic net
+```{r predicting diagnosis}
+############################# LINEAR SVM ¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤
+set.seed(60)
+
+#grid search for optimal cost parameter
+grid <- expand.grid(C = 2^(seq(-4,4)))
+
+
+### Linear svm no class weights
+#full training set
+svmcontDepLinNoWeights <- train(x = contDep[,contDepPredictors], y = contDep$Diagnosis,
+                    method = "svmLinear",
+                    metric = "Dist",
+                    maximize = FALSE, #since we are minizing the distance between sens and spec
+                    trControl=contDepCtrl,
+                    tuneGrid = grid)
+
+svmcontDepLinNoWeights
+save(svmcontDepLinNoWeights, file = 'svmcontDepLinNoWeights.RData')
+
+
+
+#plotting roc curve to see what threshold optimizes AUC. Currently sens = 0.74, spec = 0.95
+plot(roc(svmcontDepLinNoWeights$pred$obs, svmcontDepLinNoWeights$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.844. Sens = 0.799, spec = 0.866
+
+
+#downsampled
+svmcontDepDownLinNoWeights <- train(x = contDepDown[,contDepPredictors], y = contDepDown$Diagnosis,
+                    method = "svmLinear",
+                    metric = "Dist",
+                    maximize = FALSE,
+                    trControl=contDepDownCtrl,
+                    tuneGrid = grid)
+
+
+svmcontDepDownLinNoWeights
+save(svmcontDepDownLinNoWeights, file = 'svmcontDepDownLinNoWeights.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. Currently sens = 80, spec = 81
+plot(roc(svmcontDepDownLinNoWeights$pred$obs, svmcontDepDownLinNoWeights$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.348. Sens = 0.82, spec = 0.90
+
+
+### Linear svm with class weights  ###### NOT USING ######################################
+#full training data
+# svmcontDepLinWeighted <- train(x = contDep[,contDepPredictors], y = contDep$Diagnosis,
+#                     method = "svmLinear",
+#                     metric = "Dist",
+#                     maximize = FALSE,
+#                     trControl=contDepCtrl,
+#                     tuneGrid = grid,
+#                     class.weights = c(Control = 1, Depression = 20)) #5 times as costly to choose depression
+# 
+# svmcontDepLinWeighted
+# save(svmcontDepLinWeighted, file = 'svmcontDepLinWeighted.RData')
+# 
+# #downsampled
+# svmcontDepDownLinWeighted <- train(x = contDepDown[,contDepPredictors], y = contDepDown$Diagnosis,
+#                     method = "svmLinear",
+#                     metric = "Dist",
+#                     maximize = FALSE,
+#                     trControl=contDepDownCtrlNoProb,
+#                     tuneGrid = grid,
+#                     class.weights = c(Control = 3, Depression = 1))
+# 
+# svmcontDepDownLinWeighted
+# save(svmcontDepDownLinWeighted, file = 'svmcontDepDownLinWeighted.RData')
+# 
+
+############################# RBF SVM ¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤
+#finding optimal sigma and cost parameters
+sigmaRange <- sigest(as.matrix(contDep[,contDepPredictors]))
+svmRGrid2 <- expand.grid(.sigma = sigmaRange, .C = 2^(seq(-4, 4)))
+#### no class weights
+#full training set
+svmcontDepRbfNoWeights <- train(contDep[,contDepPredictors], contDep$Diagnosis, 
+                   method = "svmRadial", 
+                   metric = "Dist", 
+                   maximize = FALSE,
+                   tuneGrid = svmRGrid2, 
+                   trControl = contDepCtrl)
+plot(svmcontDepRbfNoWeights)
+svmcontDepRbfNoWeights
+save(svmcontDepRbfNoWeights, file = 'svmcontDepRbfNoWeights.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. Currently sens = 0.77, spec = 0.96
+plot(roc(svmcontDepRbfNoWeights$pred$obs, svmcontDepRbfNoWeights$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.876, sens = 0.82, spec = 0.85
+
+#downsampled
+svmcontDepDownRbfNoWeights <- train(contDepDown[,contDepPredictors], contDepDown$Diagnosis, 
+                   method = "svmRadial", 
+                   metric = "Dist",
+                   maximize = FALSE, 
+                   tuneGrid = svmRGrid2, 
+                   trControl = contDepDownCtrl)
+svmcontDepDownRbfNoWeights
+save(svmcontDepDownRbfNoWeights, file = 'svmcontDepDownRbfNoWeights.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. Currently sens = 0.74, spec = 0.80
+plot(roc(svmcontDepDownRbfNoWeights$pred$obs, svmcontDepDownRbfNoWeights$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.598. sens = 0.81, spec = 0.82
+
+#### with class weights  - NOT USING #################################################3
+# svmcontDepRbfWeighted <- train(contDep[,contDepPredictors], contDep$Diagnosis, 
+#                    method = "svmRadial", 
+#                    metric = "Dist",
+#                    maximize = FALSE, 
+#                    tuneGrid = svmRGrid2, 
+#                    trControl = contDepCtrlNoProb,
+#                    class.weights = c(Control = 1, Depression = 5))
+# plot(svmcontDepRbfWeighted)
+# svmcontDepRbfWeighted
+# save(svmcontDepRbfWeighted, file = 'svmcontDepRbfWeighted.RData')
+# 
+# svmcontDepDownRbfWeighted <- train(contDepDown[,contDepPredictors], contDepDown$Diagnosis, 
+#                    method = "svmRadial", 
+#                    metric = "Dist",
+#                    maximize = FALSE, 
+#                    tuneGrid = svmRGrid2, 
+#                    trControl = contDepDownCtrlNoProb,
+#                    class.weights = c(Control = 1, Depression = 5))
+# svmcontDepDownRbfWeighted
+# save(svmcontDepDownRbfWeighted, file = 'svmcontDepDownRbfWeighted.RData')
+
+
+```
+
+#SVM models - lit features
+```{r predicting diagnosis}
+############################# LINEAR SVM ¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤
+set.seed(60)
+
+#grid search for optimal cost parameter
+grid <- expand.grid(C = 2^(seq(-4,4)))
+
+
+### Linear svm no class weights
+#full training set
+svmlitLinNoWeights <- train(x = contDep[,litPredictors], y = contDep$Diagnosis,
+                    method = "svmLinear",
+                    metric = "Dist",
+                    maximize = FALSE, #since we are minizing the distance between sens and spec
+                    trControl=contDepCtrl,
+                    tuneGrid = grid)
+
+svmlitLinNoWeights
+save(svmlitLinNoWeights, file = 'svmlitLinNoWeights.RData')
+
+
+#plotting roc curve to see what threshold optimizes AUC. Currently sens = 0.31, spec = 0.59
+plot(roc(svmlitLinNoWeights$pred$obs, svmlitLinNoWeights$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.856. Sens = 0.623, spec = 0.647
+
+
+#downsampled
+svmlitDownLinNoWeights <- train(x = contDepDown[,litPredictors], y = contDepDown$Diagnosis,
+                    method = "svmLinear",
+                    metric = "Dist",
+                    maximize = FALSE,
+                    trControl=contDepDownCtrl,
+                    tuneGrid = grid)
+
+
+svmlitDownLinNoWeights
+save(svmlitDownLinNoWeights, file = 'svmlitDownLinNoWeights.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. Currently sens = 0.54, spec = 0.69
+plot(roc(svmlitDownLinNoWeights$pred$obs, svmlitDownLinNoWeights$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.988. Sens = 0.16, spec = 0.93
+
+
+############################# RBF SVM ¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤
+#finding optimal sigma and cost parameters
+sigmaRange <- sigest(as.matrix(contDep[,litPredictors]))
+svmRGrid2 <- expand.grid(.sigma = sigmaRange, .C = 2^(seq(-4, 4)))
+#### no class weights
+#full training set
+svmlitRbfNoWeights <- train(contDep[,litPredictors], contDep$Diagnosis, 
+                   method = "svmRadial", 
+                   metric = "Dist", 
+                   maximize = FALSE,
+                   tuneGrid = svmRGrid2, 
+                   trControl = contDepCtrl)
+plot(svmlitRbfNoWeights)
+svmlitRbfNoWeights
+save(svmlitRbfNoWeights, file = 'svmlitRbfNoWeights.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. Currently sens = 0.40, spec = 0.89
+plot(roc(svmlitRbfNoWeights$pred$obs, svmlitRbfNoWeights$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.694, sens = 0.482, spec = 0.821
+
+#downsampled
+svmlitDownRbfNoWeights <- train(contDepDown[,litPredictors], contDepDown$Diagnosis, 
+                   method = "svmRadial", 
+                   metric = "Dist",
+                   maximize = FALSE, 
+                   tuneGrid = svmRGrid2, 
+                   trControl = contDepDownCtrl)
+svmlitDownRbfNoWeights
+save(svmlitDownRbfNoWeights, file = 'svmlitDownRbfNoWeights.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. Currently sens = 0.76, spec = 0.51
+plot(roc(svmlitDownRbfNoWeights$pred$obs, svmlitDownRbfNoWeights$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.034 sens = 0.32, spec = 0.823
+```
+
+#Random forest - elastic net
+```{r}
+#full training set
+rfGrid <- expand.grid(.mtry= 1:12)
+
+contDepRf <- train(x = contDep[,contDepPredictors], y = contDep$Diagnosis,
+                    method = "rf",
+                    metric = "Dist",
+                    maximize = FALSE,
+                    tuneGrid =  rfGrid,
+                    trControl=contDepCtrl)
+plot(contDepRf)
+contDepRf
+save(contDepRf,  file = 'contDepRf.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. Currently sens = 0.51, spec = 0.98
+plot(roc(contDepRf$pred$obs, contDepRf$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.815. sens = 0.81, spec = 0.729
+
+#downsampled
+contDepDownRf <- train(x = contDepDown[,contDepPredictors], y = contDepDown$Diagnosis,
+                    method = "rf",
+                    metric = "Dist",
+                    maximize = FALSE,
+                    tuneGrid = rfGrid,
+                    trControl=contDepDownCtrl)
+contDepDownRf
+save(contDepDownRf, file =  'contDepDownRf.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. Currently sens = 0.71, spec = 0.73
+plot(roc(contDepDownRf$pred$obs, contDepDownRf$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.723. sens = 0.87, spec = 0.52
+
+```
+
+#Random forest - lit feautres
+```{r}
+#full training set
+rfGrid <- expand.grid(.mtry= 1:27)
+
+litRf <- train(x = contDep[,litPredictors], y = contDep$Diagnosis,
+                    method = "rf",
+                    metric = "Dist",
+                    maximize = FALSE,
+                    tuneGrid =  rfGrid,
+                    trControl=contDepCtrl)
+plot(litRf)
+litRf
+save(litRf,  file = 'litRf.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. Currently sens = 0.34, spec = 0.93
+plot(roc(litRf$pred$obs, litRf$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.677. sens = 0.467, spec = 0.795
+
+#downsampled
+litDownRf <- train(x = contDepDown[,litPredictors], y = contDepDown$Diagnosis,
+                    method = "rf",
+                    metric = "Dist",
+                    maximize = FALSE,
+                    tuneGrid = rfGrid,
+                    trControl=contDepDownCtrl)
+litDownRf
+save(litDownRf, file =  'litDownRf.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. Currently sens = 0.54, spec = 0.78
+plot(roc(litDownRf$pred$obs, litDownRf$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.331. sens = 0.36, spec = 0.85
+
+```
+
+#XGboost (v1 - probably don't use)
+```{r}
+
+#### work in progress 
+
+#following this tutorial: https://www.kaggle.com/pelkoja/visual-xgboost-tuning-with-caret
+
+# #tuneable parameters:
+#     nrounds: Number of trees, default: 100
+#     max_depth: Maximum tree depth, default: 6
+#     eta: Learning rate, default: 0.3
+#     gamma: Used for tuning of Regularization, default: 0
+#     colsample_bytree: Column sampling, default: 1
+#     min_child_weight: Minimum leaf weight, default: 1
+#     subsample: Row sampling, default: 1
+
+#### Fitting baseline xgboost with default parameters
+grid_default <- expand.grid(
+  nrounds = 100,
+  max_depth = 6,
+  eta = 0.3,
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+train_control <- caret::trainControl(
+  method = "none",
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgbBase <- train(x = contDep[,contDepPredictors], y = contDep$Diagnosis,
+                 trControl = ctrl,
+                 tuneGrid = grid_default,
+                 method = "xgbTree",
+                 verbose = TRUE
+)
+
+xgbBase
+
+############TUNING PARAMETERS
+# start nrounds from 200, as smaller learning rates result in errors so large with lower starting points that they'll mess the scales
+tune_grid <- expand.grid(
+  nrounds = seq(from = 200, to = 1000, by = 50), #max treedepth 1000 to get a reasonable running time while testing hyperparameter combinations
+  eta = c(0.025, 0.05, 0.1, 0.3), #rule of thumb [2-10]/#trees
+  max_depth = c(2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+tune_control <-trainControl(
+  method = "cv", # cross-validation
+  number = 3, # with n folds 
+  verboseIter = FALSE, # no training log
+  allowParallel = TRUE # FALSE for reproducible results 
+)
+
+xgbTune <- train(x = contDep[,contDepPredictors], y = contDep$Diagnosis,
+                 trControl = tune_control,
+                 tuneGrid = tune_grid,
+                 method = "xgbTree",
+                 verbose = TRUE
+)
+
+xgbTune
+
+# helper function to plot results
+tuneplot <- function(x, probs = .90) {
+  ggplot(x) +
+    coord_cartesian(ylim = c(quantile(x$results$Accuracy, probs = probs), min(x$results$Accuracy))) +
+    theme_bw()
+}
+tuneplot(xgbTune)
+xgbTune$bestTune
+
+##with 1000 iterations an eta (learning rate) of 0.3 seems to be a good starting point, though they are all very close 
+
+###Finding optimal max_depth and min_child_weight
+#fixing the learning rate to 0.3 setting maximum depth to 2 (best from previous model) to 4 to experiment a bit around the suggested best tune in previous step. Then, well fix maximum depth and minimum child weight:
+
+tune_grid2 <- expand.grid(
+  nrounds = seq(from = 50, to = 1000, by = 50),
+  eta = xgbTune$bestTune$eta,
+  max_depth = c(xgbTune$bestTune$max_depth:4),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = c(1, 2, 3),
+  subsample = 1
+)
+
+xgbTune2 <- train(x = contDep[,contDepPredictors], y = contDep$Diagnosis,
+  trControl = tune_control,
+  tuneGrid = tune_grid2,
+  method = "xgbTree",
+  verbose = TRUE
+)
+xgbTune2
+tuneplot(xgbTune2)
+xgbTune2$bestTune
+
+####Tuning row and column sampling
+tune_grid3 <- expand.grid(
+  nrounds = seq(from = 50, to = 1000, by = 50),
+  eta = xgbTune$bestTune$eta, #still 0.3
+  max_depth = xgbTune2$bestTune$max_depth,  #found to be 4
+  gamma = 0,
+  colsample_bytree = c(0.4, 0.6, 0.8, 1.0),
+  min_child_weight = xgbTune2$bestTune$min_child_weight, #found to be 1
+  subsample = c(0.5, 0.75, 1.0)
+)
+
+xgbTune3 <- train(x = contDep[,contDepPredictors], y = contDep$Diagnosis,
+  trControl = tune_control,
+  tuneGrid = tune_grid3,
+  method = "xgbTree",
+  verbose = TRUE
+)
+
+tuneplot(xgbTune3, probs = .95)
+xgbTune3$bestTune
+
+####Tuning gamma
+tune_grid4 <- expand.grid(
+  nrounds = seq(from = 50, to = 1000, by = 50),
+  eta = xgbTune$bestTune$eta,
+  max_depth = xgbTune2$bestTune$max_depth,
+  gamma = c(0, 0.05, 0.1, 0.5, 0.7, 0.9, 1.0), #trying different gamma values
+  colsample_bytree = xgbTune3$bestTune$colsample_bytree,
+  min_child_weight = xgbTune2$bestTune$min_child_weight,
+  subsample = xgbTune3$bestTune$subsample
+)
+
+xgbTune4 <-train(x = contDep[,contDepPredictors], y = contDep$Diagnosis,
+  trControl = tune_control,
+  tuneGrid = tune_grid4,
+  method = "xgbTree",
+  verbose = TRUE
+)
+
+tuneplot(xgbTune4)
+xgbTune4$bestTune
+
+#Reducing learning rate (eta)  to find the final model
+tune_grid5 <- expand.grid(
+  nrounds = seq(from = 100, to = 10000, by = 100), #upping treedepth to 10000
+  eta = c(0.01, 0.015, 0.025, 0.05, 0.1),
+  max_depth = xgbTune2$bestTune$max_depth,
+  gamma = xgbTune4$bestTune$gamma,
+  colsample_bytree = xgbTune3$bestTune$colsample_bytree,
+  min_child_weight = xgbTune2$bestTune$min_child_weight,
+  subsample = xgbTune3$bestTune$subsample
+)
+
+xgbTune5 <- train(x = contDep[,contDepPredictors], y = contDep$Diagnosis,
+  trControl = tune_control,
+  tuneGrid = tune_grid5,
+  method = "xgbTree",
+  verbose = TRUE
+)
+
+tuneplot(xgbTune5)
+xgbTune5$bestTune
+
+###### Final model
+final_grid <- expand.grid(
+  nrounds = xgbTune5$bestTune$nrounds,
+  eta = xgbTune5$bestTune$eta,
+  max_depth = xgbTune5$bestTune$max_depth,
+  gamma = xgbTune5$bestTune$gamma,
+  colsample_bytree = xgbTune5$bestTune$colsample_bytree,
+  min_child_weight = xgbTune5$bestTune$min_child_weight,
+  subsample = xgbTune5$bestTune$subsample
+)
+
+xgbFit <- train(x = contDep[,contDepPredictors], y = contDep$Diagnosis,
+  trControl = train_control,
+  tuneGrid = final_grid,
+  method = "xgbTree",
+  verbose = TRUE
+)
+
+xgbFit
+
+
+############ testing performance
+#### baseline xgboost with default parameters
+
+
+## pretty decent!
+
+
+##### default parameters were better. Probably due tothe insanely high testing accuracies making it difficult to tune
+
+```
+
+#XGBoost (v2 - simpler, use)  - elastic net
+```{r}
+
+set.seed(1)
+contDepXGB <- train(x = contDep[,contDepPredictors], y = contDep$Diagnosis, 
+                 trControl = contDepCtrl, 
+                 method = "xgbTree", 
+                 metric = "Dist",
+                 maximize = FALSE,
+                 #the scale_pos_weight is recommended for imbalanced classes in the xgboost help. They recommend sum(negativeClass)/sum(sum(postiveClass)). Following their recommendation.
+                 scale_pos_weight = sum(contDep$Diagnosis == "Control")/sum(contDep$Diagnosis == "Depression")) 
+
+#inspecting top results
+contDepXGB$results %>% 
+  top_n(-5, wt = Dist) %>%
+  arrange(desc(Dist))
+
+#plotting roc curve (with threshold for optimal ROC) to see if changing threshold might produce a better balance between spec. and sens (currently spec = 0.98, sens = 0.57)
+plot(roc(contDepXGB$pred$obs, contDepXGB$pred$Depression),
+     print.thres = TRUE)
+#suggested threshold = 0.950. sens = 0.76, spec = 0.83
+
+save(contDepXGB, file = 'contDepXGB.RData')
+
+
+##for the downsampled data
+contDepDownXGB <- train(x = contDepDown[,contDepPredictors], y = contDepDown$Diagnosis, 
+                 trControl = contDepDownCtrl, 
+                 method = "xgbTree", 
+                 metric = "Dist",
+                 maximize = FALSE)
+#not including the scale_post_weights argument since the classes are balanced in the downsampled data
+
+
+#inspecting top results
+contDepDownXGB$results %>% 
+  top_n(-5, wt = Dist) %>%
+  arrange(desc(Dist))
+
+#plotting roc curve (with threshold for optimal ROC) to see if changing threshold might produce a better balance between spec. and sens (currently sens = 0.76, spec = 0.75) (hard to optimize if going for balance)
+plot(roc(contDepDownXGB$pred$obs, contDepDownXGB$pred$Depression),
+     print.thres = TRUE)
+#suggests a threshold of 0.905: sens = 0.88, spec = 0.67
+save(contDepDownXGB, file = 'contDepDownXGB.RData')
+```
+
+#XGBoost (v2 - simpler, use) - lit features
+```{r}
+
+set.seed(1)
+litXGB <- train(x = contDep[,litPredictors], y = contDep$Diagnosis, 
+                 trControl = contDepCtrl, 
+                 method = "xgbTree", 
+                 metric = "Dist",
+                 maximize = FALSE,
+                 #the scale_pos_weight is recommended for imbalanced classes in the xgboost help. They recommend sum(negativeClass)/sum(sum(postiveClass)). Following their recommendation.
+                 scale_pos_weight = sum(contDep$Diagnosis == "Control")/sum(contDep$Diagnosis == "Depression")) 
+
+#inspecting top results
+litXGB$results %>% 
+  top_n(-5, wt = Dist) %>%
+  arrange(desc(Dist))
+
+#plotting roc curve (with threshold for optimal ROC) to see if changing threshold might produce a better balance between spec. and sens (currently sens = 0.35, spec = 0.94)
+plot(roc(litXGB$pred$obs, litXGB$pred$Depression),
+     print.thres = TRUE)
+#suggested threshold = 0.938. sens = 0.55, spec = 0.74
+
+save(litXGB, file = 'litXGB.RData')
+
+
+##for the downsampled data
+litDownXGB <- train(x = contDepDown[,litPredictors], y = contDepDown$Diagnosis, 
+                 trControl = contDepDownCtrl, 
+                 method = "xgbTree", 
+                 metric = "Dist",
+                 maximize = FALSE)
+#not including the scale_post_weights argument since the classes are balanced in the downsampled data
+
+
+#inspecting top results
+litDownXGB$results %>% 
+  top_n(-5, wt = Dist) %>%
+  arrange(desc(Dist))
+
+#plotting roc curve (with threshold for optimal ROC) to see if changing threshold might produce a better balance between spec. and sens (currently sens = 0.66, spec = 0.73) 
+plot(roc(litDownXGB$pred$obs, litDownXGB$pred$Depression),
+     print.thres = TRUE)
+#suggests a threshold of 0.21: sens = 0.435, spec = 0.727
+save(litDownXGB, file = 'litDownXGB.RData')
+```
+
+#Naive Bayes - elastic net
+```{r}
+#http://uc-r.github.io/naive_bayes   <- nice tutorial 
+####### Predicting Diagnosis
+
+#tuning grid
+grid <- expand.grid(fL=seq(0,1, 0.1), 
+                    usekernel = TRUE, 
+                    adjust=seq(0,1,0.1))
+
+
+#usekernel parameter allows us to use a kernel density estimate for continuous variables versus a guassian density estimate,
+#adjust allows us to adjust the bandwidth of the kernel density (larger numbers mean more flexible density estimate),
+#fL allows us to incorporate the Laplace smoother. (adding a small number to each of the counts in the frequencies for each feature, which ensures that each feature has a nonzero probability of occuring for each class)
+
+#full training data
+contDepNb <- train(x = contDep[,contDepPredictors], y = contDep$Diagnosis,
+              method = 'nb',
+              trControl = contDepCtrl,
+              prior = c(0.5, 0.5), #setting equal priors to try to deal with uneven class size
+              metric = "Dist",
+              maximize = FALSE,
+              tuneGrid = grid) 
+
+plot(contDepNb)
+contDepNb$results %>% 
+  top_n(-5, wt = Dist) %>%
+  arrange(desc(Dist))
+
+save(contDepNb, file = 'contDepNb.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. (currently sens = 0.82, 0.84)
+plot(roc(contDepNb$pred$obs, contDepNb$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.31, sens = 0.71, spec = 0.85
+
+
+#downsampled
+contDepDownNb <- train(x = contDepDown[,contDepPredictors],y = contDepDown$Diagnosis,
+              method = 'nb',
+              trControl = contDepDownCtrl,
+              metric = "Dist",
+              maximize = FALSE, 
+              tuneGrid = grid) 
+
+
+contDepDownNb$results %>% 
+  top_n(-5, wt = Dist) %>%
+  arrange(desc(Dist))
+
+save(contDepDownNb, file = 'contDepDownNb.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. (currently sens = 0.79, spec = 0.63)
+plot(roc(contDepDownNb$pred$obs, contDepDownNb$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.113, sens = 0.67, spec = 0.76
+```
+
+#Naive Bayes - lit features
+```{r}
+#http://uc-r.github.io/naive_bayes   <- nice tutorial 
+####### Predicting Diagnosis
+
+#tuning grid
+grid <- expand.grid(fL=seq(0,1, 0.1), 
+                    usekernel = TRUE, 
+                    adjust=seq(0,1,0.1))
+
+
+#usekernel parameter allows us to use a kernel density estimate for continuous variables versus a guassian density estimate,
+#adjust allows us to adjust the bandwidth of the kernel density (larger numbers mean more flexible density estimate),
+#fL allows us to incorporate the Laplace smoother. (adding a small number to each of the counts in the frequencies for each feature, which ensures that each feature has a nonzero probability of occuring for each class)
+
+#full training data
+litNb <- train(x = contDep[,litPredictors], y = contDep$Diagnosis,
+              method = 'nb',
+              trControl = contDepCtrl,
+              prior = c(0.5, 0.5), #setting equal priors to try to deal with uneven class size
+              metric = "Dist",
+              maximize = FALSE,
+              tuneGrid = grid) 
+
+plot(litNb)
+litNb$results %>% 
+  top_n(-5, wt = Dist) %>%
+  arrange(desc(Dist))
+
+save(litNb, file = 'litNb.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. (currently sens = 0.48, 0.78)
+plot(roc(litNb$pred$obs, litNb$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.685, sens = 0.53, spec = 0.75
+
+
+#downsampled
+litDownNb <- train(x = contDepDown[,litPredictors],y = contDepDown$Diagnosis,
+              method = 'nb',
+              trControl = contDepDownCtrl,
+              metric = "Dist",
+              maximize = FALSE, 
+              tuneGrid = grid) 
+
+
+litDownNb$results %>% 
+  top_n(-5, wt = Dist) %>%
+  arrange(desc(Dist))
+
+save(litDownNb, file = 'litDownNb.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. (currently sens = 0.64, spec = 0.54)
+plot(roc(litDownNb$pred$obs, litDownNb$pred$Depression),
+     print.thres = TRUE)
+#suggests 1.0, sens = 0.15, spec = 0.94 ?????????
+```
+
+#K-Nearest neighbors - elastic net
+```{r}
+#full training set
+contDepKnn <- train(contDep[,contDepPredictors], contDep$Diagnosis, 
+                method = "knn", 
+                metric = "Dist",
+                maximize = FALSE, 
+                tuneGrid = data.frame(.k = c(4*(0:5)+1, 20*(1:5)+1,50*(2:9)+1)),
+                trControl = contDepCtrl)
+
+plot(contDepKnn)
+contDepKnn
+save(contDepKnn, file = 'contDepKnn.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. (currently sens = 0.61, spec = 0.97)
+plot(roc(contDepKnn$pred$obs, contDepKnn$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.87, sens = 0.81, spec = 0.77
+
+
+#downsampled
+contDepDownKnn <- train(contDepDown[,contDepPredictors], contDepDown$Diagnosis, 
+                method = "knn", 
+                metric = "Dist",
+                maximize = FALSE,
+                tuneGrid = data.frame(.k = c(4*(0:5)+1, 20*(1:5)+1,50*(2:9)+1)),
+                trControl = contDepDownCtrl)
+
+plot(contDepDownKnn)
+contDepDownKnn
+save(contDepDownKnn, file = 'contDepDownKnn.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. (currently sens = 0.66, spec = 0.82)
+plot(roc(contDepDownKnn$pred$obs, contDepDownKnn$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.564, sens = 0.68, spec = 0.75
+
+```
+
+#K-Nearest neighbors - lit features
+```{r}
+#full training set
+litKnn <- train(contDep[,litPredictors], contDep$Diagnosis, 
+                method = "knn", 
+                metric = "Dist",
+                maximize = FALSE, 
+                tuneGrid = data.frame(.k = c(4*(0:5)+1, 20*(1:5)+1,50*(2:9)+1)),
+                trControl = contDepCtrl)
+
+plot(litKnn)
+litKnn
+save(litKnn, file = 'litKnn.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. (currently sens = 0.44, spec = 0.86)
+plot(roc(litKnn$pred$obs, litKnn$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.76, sens = 0.50, spec = 0.68
+
+
+#downsampled
+litDownKnn <- train(contDepDown[,litPredictors], contDepDown$Diagnosis, 
+                method = "knn", 
+                metric = "Dist",
+                maximize = FALSE,
+                tuneGrid = data.frame(.k = c(4*(0:5)+1, 20*(1:5)+1,50*(2:9)+1)),
+                trControl = contDepDownCtrl)
+
+plot(litDownKnn)
+litDownKnn
+save(litDownKnn, file = 'litDownKnn.RData')
+
+#plotting roc curve to see what threshold optimizes AUC. (currently sens = 0.69, spec = 0.75)
+plot(roc(litDownKnn$pred$obs, litDownKnn$pred$Depression),
+     print.thres = TRUE)
+#suggests 0.42, sens = 0.36, spec = 0.80
+
+```
+
+Predictions - elastic net
+```{r}
+############################# TESTING PERFORMANCE - Diagnosis #######################
+################# WORK IN PROGRESS #####################
+contDepTest <- read.csv("contDep_test.csv")
+
+#making new dataframe to hold only predictions
+contDepResults <- data.frame(Diagnosis = contDepTest$Diagnosis)
+
+#loading models 
+load('contDepLogistic.RData')
+load('contDepDownLogistic.RData')
+
+load('svmcontDepLinNoWeights.RData')
+load('svmcontDepDownLinNoWeights.RData')
+load('svmcontDepLinWeighted.RData')
+load('svmcontDepDownLinWeighted.RData')
+
+load('svmcontDepRbfNoWeights.RData')
+load('svmcontDepDownRbfNoWeights.RData')
+load('svmcontDepRbfWeighted.RData')
+load('svmcontDepDownRbfWeighted.RData')
+
+load('contDepRf.RData')
+load('contDepDownRf.RData')
+
+load('contDepXGB.RData')
+load('contDepDownXGB.RData')
+
+load('contDepNb.RData')
+load('contDepDownNb.RData')
+
+load('contDepKnn.RData')
+load('contDepDownKnn.RData')
+
+
+######### list of models
+#without the weighted svm (since it doesn't make sense to calculate probabilities from the weighted models)
+contDepModelList <- list(bayesLog = contDepLogistic,
+                          bayesLogDown = contDepDownLogistic,
+                          
+                          svmLin = svmcontDepLinNoWeights,
+                          svmLinDown = svmcontDepDownLinNoWeights,
+                          svmRbf = svmcontDepRbfNoWeights,
+                          svmRbfDown = svmcontDepDownRbfNoWeights,
+
+                          rf = contDepRf,
+                          rfDown = contDepDownRf,
+                          
+                          XGB = contDepXGB,
+                          XGBDown = contDepDownXGB,
+
+                          nb = contDepNb,
+                          nbDown = contDepDownNb,
+
+                          knn = contDepKnn,
+                          knnDown = contDepDownKnn)
+
+#adding predictions to df
+predictFun <- function(model, data, type = 'prob'){
+  if(type == 'prob'){
+  pred <- predict(model, newdata = data, type = "prob", re_formula = NA)[,2]
+  }
+  if(type == 'prediction'){
+  pred <- predict(model, newdata = data)
+  }
+  return(pred)
+}
+
+#calculating prediction probabilites
+contDepPredictionsProb <- lapply(contDepModelList, predictFun, data = contDepTest[,contDepPredictors], type ='prob')%>%
+  bind_rows()
+
+#calculating predicted class
+#predict function for brms models behaves a bit differently, needs to be done seperately/in another function and added to the dataframe
+noBayes <- c("bayesLog", "bayesLogDown")
+contDepModelListNoBayes <- contDepModelList[-which(names(contDepModelList) == noBayes)]  
+
+
+contDepPredictions <- lapply(contDepModelListNoBayes, predictFun, data = contDepTest[,contDepPredictors], type = 'prediction') %>%
+  bind_rows()
+
+
+
+contDepPredictions <- contDepPredictions %>%
+  mutate(bayesLog = as.factor(ifelse(predict(contDepLogistic, newdata = contDepTest[,contDepPredictors], re_formula = NA)[,1] > 0.5, 'Depression', 'Control')),
+         bayesLogDown = as.factor(ifelse(predict(contDepDownLogistic, newdata = contDepTest[,contDepPredictors], re_formula = NA)[,1] > 0.5, 'Depression', 'Control')))
+```
+
+#ensemble - elastic net
+```{r}
+#try different types of ensembles
+#choosing the most confident predictor
+contDepPredictionsProb$ensembleMax <- apply(contDepPredictionsProb, 1, max)
+#pooling predictions with mean
+contDepPredictionsProb$ensembleMean <- apply(contDepPredictionsProb, 1, mean)
+#pooling preditions with median
+contDepPredictionsProb$ensembleMedian <- apply(contDepPredictionsProb, 1, median)
+
+#adding adding ensemble predictions to the predictions df
+contDepPredictions$ensembleMax <- as.factor(ifelse(contDepPredictionsProb$ensembleMax > 0.5, "Depression", "Control"))
+contDepPredictions$ensembleMean <- as.factor(ifelse(contDepPredictionsProb$ensembleMean > 0.5, "Depression", "Control"))
+contDepPredictions$ensembleMedian <- as.factor(ifelse(contDepPredictionsProb$ensembleMedian > 0.5, "Depression", "Control"))
+```
+
+Predictions - lit features
+```{r}
+############################# TESTING PERFORMANCE - Diagnosis #######################
+################# WORK IN PROGRESS #####################
+litTest <- read.csv("contDep_test.csv")
+
+#making new dataframe to hold only predictions
+litResults <- data.frame(Diagnosis = litTest$Diagnosis)
+
+#loading models 
+load('litLogistic.RData')
+load('litDownLogistic.RData')
+
+load('svmlitLinNoWeights.RData')
+load('svmlitDownLinNoWeights.RData')
+#load('svmlitLinWeighted.RData')
+#load('svmlitDownLinWeighted.RData')
+
+load('svmlitRbfNoWeights.RData')
+load('svmlitDownRbfNoWeights.RData')
+#load('svmlitRbfWeighted.RData')
+#load('svmlitDownRbfWeighted.RData')
+
+load('litRf.RData')
+load('litDownRf.RData')
+
+load('litXGB.RData')
+load('litDownXGB.RData')
+
+load('litNb.RData')
+load('litDownNb.RData')
+
+load('litKnn.RData')
+load('litDownKnn.RData')
+
+
+######### list of models
+#without the weighted svm (since it doesn't make sense to calculate probabilities from the weighted models)
+litModelList <- list(bayesLog = litLogistic,
+                          bayesLogDown = litDownLogistic,
+                          
+                          svmLin = svmlitLinNoWeights,
+                          svmLinDown = svmlitDownLinNoWeights,
+                          svmRbf = svmlitRbfNoWeights,
+                          svmRbfDown = svmlitDownRbfNoWeights,
+
+                          rf = litRf,
+                          rfDown = litDownRf,
+                          
+                          XGB = litXGB,
+                          XGBDown = litDownXGB,
+
+                          nb = litNb,
+                          nbDown = litDownNb,
+
+                          knn = litKnn,
+                          knnDown = litDownKnn)
+
+#adding predictions to df
+predictFun <- function(model, data, type = 'prob'){
+  if(type == 'prob'){
+  pred <- predict(model, newdata = data, type = "prob", re_formula = NA)[,2]
+  }
+  if(type == 'prediction'){
+  pred <- predict(model, newdata = data)
+  }
+  return(pred)
+}
+
+#calculating prediction probabilites
+litPredictionsProb <- lapply(litModelList, predictFun, data = litTest[,litPredictors], type ='prob')%>%
+  bind_rows()
+
+#calculating predicted class
+#predict function for brms models behaves a bit differently, needs to be done seperately/in another function and added to the dataframe
+noBayes <- c("bayesLog", "bayesLogDown")
+litModelListNoBayes <- litModelList[-which(names(litModelList) == noBayes)]  
+
+
+litPredictions <- lapply(litModelListNoBayes, predictFun, data = litTest[,litPredictors], type = 'prediction') %>%
+  bind_rows()
+
+
+
+litPredictions <- litPredictions %>%
+  mutate(bayesLog = as.factor(ifelse(predict(litLogistic, newdata = litTest[,litPredictors], re_formula = NA)[,1] > 0.5, 'Depression', 'Control')),
+         bayesLogDown = as.factor(ifelse(predict(litDownLogistic, newdata = litTest[,litPredictors], re_formula = NA)[,1] > 0.5, 'Depression', 'Control')))
+```
+
+#ensemble - lit features
+```{r}
+#try different types of ensembles
+#choosing the most confident predictor
+litPredictionsProb$ensembleMax <- apply(litPredictionsProb, 1, max)
+#pooling predictions with mean
+litPredictionsProb$ensembleMean <- apply(litPredictionsProb, 1, mean)
+#pooling preditions with median
+litPredictionsProb$ensembleMedian <- apply(litPredictionsProb, 1, median)
+
+#adding adding ensemble predictions to the predictions df
+litPredictions$ensembleMax <- as.factor(ifelse(litPredictionsProb$ensembleMax > 0.5, "Depression", "Control"))
+litPredictions$ensembleMean <- as.factor(ifelse(litPredictionsProb$ensembleMean > 0.5, "Depression", "Control"))
+litPredictions$ensembleMedian <- as.factor(ifelse(litPredictionsProb$ensembleMedian > 0.5, "Depression", "Control"))
+
+bestThree <- litPredictionsProb %>%
+  select(svmLinDown, svmRbfDown, bayesLogDown) %>%
+  mutate(maxProb = apply(., 1, max), meanProb = apply(., 1, mean), medianProb = apply(., 1, median))
+
+litPredictions$best3Max <- as.factor(ifelse(bestThree$maxProb > 0.5, "Depression", "Control"))
+litPredictions$best3Mean <- as.factor(ifelse(bestThree$meanProb > 0.5, "Depression", "Control"))
+litPredictions$best3Median <- as.factor(ifelse(bestThree$medianProb > 0.5, "Depression", "Control"))
+
+```
+
+#performance - elastic net
+```{r}
+
+#confusion matrices for all models with standard .5 threshold
+confusionMatrix(data = contDepPredictions$bayesLog, reference = contDepTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = contDepPredictions$bayesLogDown, reference = contDepTest$Diagnosis, positive = "Depression")
+
+confusionMatrix(data = contDepPredictions$svmLin, reference = contDepTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = contDepPredictions$svmLinDown, reference = contDepTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = contDepPredictions$svmLinWeighted, reference = contDepTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = contDepPredictions$svmRbf, reference = contDepTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = contDepPredictions$svmRbfDown, reference = contDepTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = contDepPredictions$svmRbfWeighted, reference = contDepTest$Diagnosis, positive = "Depression")
+
+confusionMatrix(data = contDepPredictions$rf, reference = contDepTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = contDepPredictions$rfDown, reference = contDepTest$Diagnosis, positive = "Depression")
+
+confusionMatrix(data = contDepPredictions$XGB, reference = contDepTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = contDepPredictions$XGBDown, reference = contDepTest$Diagnosis, positive = "Depression")
+
+confusionMatrix(data = contDepPredictions$nb, reference = contDepTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = contDepPredictions$nbDown, reference = contDepTest$Diagnosis, positive = "Depression")
+
+confusionMatrix(data = contDepPredictions$knn, reference = contDepTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = contDepPredictions$knnDown, reference = contDepTest$Diagnosis, positive = "Depression")
+
+confusionMatrix(data = contDepPredictions$ensembleMax, reference = contDepTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = contDepPredictions$ensembleMean, reference = contDepTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = contDepPredictions$ensembleMedian, reference = contDepTest$Diagnosis, positive = "Depression")
+
+####### confusion matrices with the optimized thresholds
+thresholds = list(svmLin = 0.844, svmLinDown = 0.348, svmRbf = 0.876, svmRbfDown = 0.598, rf = 0.815, rfDown = 0.723, XGB = 0.95, XGBDown = 0.905, nb = 0.31, nbDown = 0.113, knn = 0.87, knnDown = 0.564)
+
+
+confusionMatrix(as.factor(ifelse(contDepPredictionsProb$svmLin > thresholds[1], "Depression", "Control")),
+                       reference = contDepTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(contDepPredictionsProb$svmLinDown > thresholds[2], "Depression", "Control")),
+                       reference = contDepTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(contDepPredictionsProb$svmRbf > thresholds[3], "Depression", "Control")),
+                       reference = contDepTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(contDepPredictionsProb$svmRbfDown > thresholds[4], "Depression", "Control")),
+                       reference = contDepTest$Diagnosis, positive = 'Depression')
+
+confusionMatrix(as.factor(ifelse(contDepPredictionsProb$rf > thresholds[5], "Depression", "Control")),
+                       reference = contDepTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(contDepPredictionsProb$rfDown > thresholds[6], "Depression", "Control")),
+                       reference = contDepTest$Diagnosis, positive = 'Depression')
+
+confusionMatrix(as.factor(ifelse(contDepPredictionsProb$XGB > thresholds[7], "Depression", "Control")),
+                       reference = contDepTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(contDepPredictionsProb$XGBDown > thresholds[8], "Depression", "Control")),
+                       reference = contDepTest$Diagnosis, positive = 'Depression')
+
+confusionMatrix(as.factor(ifelse(contDepPredictionsProb$nb > thresholds[9], "Depression", "Control")),
+                       reference = contDepTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(contDepPredictionsProb$nbDown > thresholds[10], "Depression", "Control")),
+                       reference = contDepTest$Diagnosis, positive = 'Depression')
+
+confusionMatrix(as.factor(ifelse(contDepPredictionsProb$knn > thresholds[11], "Depression", "Control")),
+                       reference = contDepTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(contDepPredictionsProb$knnDown > thresholds[12], "Depression", "Control")),
+                       reference = contDepTest$Diagnosis, positive = 'Depression')
+
+```
+
+#auc and roc curves - elastic net
+```{r}
+#auc and ROC curves
+rocFun <- function(columnName){
+  rocObj <-roc(contDepTest$Diagnosis, contDepPredictionsProb[,columnName], levels = rev(levels(contDepTest$Diagnosis)))
+}
+
+contDepPredictionsProb <- as.data.frame(contDepPredictionsProb)
+rocs <- colnames(contDepPredictionsProb)
+
+##creating ROC objects and plotting ROC curves
+ROCS <- lapply(rocs, rocFun)
+rocs
+par(pty="s")
+plot(ROCS[[1]], legacy.axes = TRUE, col = 'green') #bayesLog
+plot(ROCS[[2]], legacy.axes = TRUE, add = T, col = 'darkgreen') #bayesLogDown
+plot(ROCS[[3]], legacy.axes = TRUE, add = T, col = 'deepskyblue')   #svmLin
+plot(ROCS[[4]], legacy.axes = TRUE, add = T, col = 'dodgerblue2')   #svmLinDown
+plot(ROCS[[5]], legacy.axes = TRUE, add = T, col = 'firebrick1')   #svmRbf
+plot(ROCS[[6]], legacy.axes = TRUE, add = T, col = 'brown')   #svmRbfDown
+
+legend("bottomright", inset = 0.02, legend = c("BayesLog", "BayesLogDown", "SvmLin", "SvmLinDown", "svmRbf", "svmRbfDown"), col = c("green", "darkgreen", "deepskyblue", "dodgerblue2", "firebrick1", "brown"), lty = 1, cex = 0.8)
+title("ROC for each algorithm [1/3]", cex = 0.8, line = 2.5)
+
+
+plot(ROCS[[7]], legacy.axes = TRUE, add = F, col = 'green')   #rf
+plot(ROCS[[8]], legacy.axes = TRUE, add = T, col = 'darkgreen')   #rfDown
+plot(ROCS[[9]], legacy.axes = TRUE, add = T, col = 'deepskyblue')   #XGB
+plot(ROCS[[10]], legacy.axes = TRUE, add = T, col = 'dodgerblue2')  #XGBdown
+plot(ROCS[[11]], legacy.axes = TRUE, add = T, col = 'firebrick1')   #nb
+plot(ROCS[[12]], legacy.axes = TRUE, add = T, col = 'brown')   #nbDown
+
+legend("bottomright", inset = 0.02, legend = c("rf", "rfDown", "XGB", "XGBDown", "nb", "nbDown"), col = c("green", "darkgreen", "deepskyblue", "dodgerblue2", "firebrick1", "brown"), lty = 1, cex = 0.8)
+title("ROC for each algorithm [2/3]", cex = 0.8, line = 2.5)
+
+
+plot(ROCS[[13]], legacy.axes = TRUE, add = F, col = 'deepskyblue')   #knn
+plot(ROCS[[14]], legacy.axes = TRUE, add = T, col = 'dodgerblue2')   #knnDown
+plot(ROCS[[15]], legacy.axes = TRUE, add = T, col = 'firebrick1')   #ensembleMax
+plot(ROCS[[16]], legacy.axes = TRUE, add = T, col = 'brown')   #ensembleMean
+plot(ROCS[[17]], legacy.axes = TRUE, add = T, col = 'indianred1')  #ensembleMedian
+
+legend("bottomright", inset = 0.02, legend = c("knn", "knnDown", "ensembleMax", "ensembleMean", "ensembleMedian"), col = c("deepskyblue", "dodgerblue2", "firebrick1", "brown", "indianred1"), lty = 1, cex = 0.8)
+title("ROC for each algorithm [3/3]", cex = 0.8, line = 2.5)
+
+
+#auc
+aucDf <- data.frame(lower = NA, auc = NA, upper = NA, model = rocs)
+for(i in 1:length(rocs)){
+  aucDf$lower[i] <- round(ci(ROCS[[i]])[1], 2)
+  aucDf$auc[i] <- round(ci(ROCS[[i]])[2], 2)
+  aucDf$upper[i] <- round(ci(ROCS[[i]])[3], 2)
+}
+aucDf <- arrange.vars(aucDf, c("auc" = 1))
+aucDf
+```
+
+#distribution of error checking
+```{r}
+contDepError <- contDepPredictionsProb %>%
+  mutate(id = contDepTest$id, diagnosis = contDepTest$DiagnosisInteger) %>%
+  group_by(id) %>%
+  summarise_if(is.numeric, mean) #%>%
+  #mutate_if(is.numeric, ifelse(. > 0.5, 'Depression', 'Control'))
+  
+#finding number of windows pr id
+contDepWindows <- contDepTest %>% 
+  select(DiagnosisInteger, id) %>%
+  group_by(id) %>% 
+  summarize(diagnosis = mean(DiagnosisInteger), windows = n())
+
+# #why does this not work??
+# testcontDepError <- merge(contDepError, contDepWindows) %>%
+#   arrange.vars(., c('windows' = 3)) %>%
+#   rowwise() %>%
+#   mutate_at(.vars = names(.)[4:20],
+#             .funs = ifelse(.> 0.5, "Depression", "Control"))
+
+
+contDepError <- merge(contDepError, contDepWindows) %>%
+  arrange.vars(., c('windows' = 3))
+
+
+#function to change numeric predictions to factors with the diagnosis
+
+numToFac <- function(columnName){
+  diagnosis <- as.factor(ifelse(contDepError[,columnName] > 0.5, 'Depression', 'Control'))
+}
+######### very messy, but works....
+asFactors <- lapply(names(contDepError)[4:20], numToFac)
+names(asFactors) <- names(contDepError)[4:20]
+asFactors <- bind_rows(asFactors)
+
+contDepError <- asFactors %>%
+  mutate(id = contDepError$id, diagnosis = contDepError$diagnosis, windows = contDepError$windows) %>%
+  arrange.vars(.,c('id' = 1, 'diagnosis' = 2, 'windows' = 3))
+
+contDepError
+```
+
+
+#performance - lit features
+```{r}
+#confusion matrices for all models with standard .5 threshold
+confusionMatrix(data = litPredictions$bayesLog, reference = litTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = litPredictions$bayesLogDown, reference = litTest$Diagnosis, positive = "Depression")
+
+confusionMatrix(data = litPredictions$svmLin, reference = litTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = litPredictions$svmLinDown, reference = litTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = litPredictions$svmRbf, reference = litTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = litPredictions$svmRbfDown, reference = litTest$Diagnosis, positive = "Depression")
+
+confusionMatrix(data = litPredictions$rf, reference = litTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = litPredictions$rfDown, reference = litTest$Diagnosis, positive = "Depression")
+
+confusionMatrix(data = litPredictions$XGB, reference = litTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = litPredictions$XGBDown, reference = litTest$Diagnosis, positive = "Depression")
+
+confusionMatrix(data = litPredictions$nb, reference = litTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = litPredictions$nbDown, reference = litTest$Diagnosis, positive = "Depression")
+
+confusionMatrix(data = litPredictions$knn, reference = litTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = litPredictions$knnDown, reference = litTest$Diagnosis, positive = "Depression")
+
+confusionMatrix(data = litPredictions$ensembleMax, reference = litTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = litPredictions$ensembleMean, reference = litTest$Diagnosis, positive = "Depression")
+confusionMatrix(data = litPredictions$ensembleMedian, reference = litTest$Diagnosis, positive = "Depression")
+
+# confusionMatrix(data = litPredictions$best3Max, reference = litTest$Diagnosis, positive = "Depression")
+# confusionMatrix(data = litPredictions$best3Mean, reference = litTest$Diagnosis, positive = "Depression")
+# confusionMatrix(data = litPredictions$best3Median, reference = litTest$Diagnosis, positive = "Depression")
+
+
+####### confusion matrices with the optimized thresholds
+thresholds = list(svmLin = 0.856, svmLinDown = 0.988, svmRbf = 0.694, svmRbfDown = 0.034, rf = 0.677, rfDown = 0.331, XGB = 0.938, XGBDown = 0.21, nb = 0.685, nbDown = 1.0, knn = 0.76, knnDown = 0.42)
+
+
+
+confusionMatrix(as.factor(ifelse(litPredictionsProb$svmLin > thresholds[1], "Depression", "Control")),
+                       reference = litTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(litPredictionsProb$svmLinDown > thresholds[2], "Depression", "Control")),
+                       reference = litTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(litPredictionsProb$svmRbf > thresholds[3], "Depression", "Control")),
+                       reference = litTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(litPredictionsProb$svmRbfDown > thresholds[4], "Depression", "Control")),
+                       reference = litTest$Diagnosis, positive = 'Depression')
+
+confusionMatrix(as.factor(ifelse(litPredictionsProb$rf > thresholds[5], "Depression", "Control")),
+                       reference = litTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(litPredictionsProb$rfDown > thresholds[6], "Depression", "Control")),
+                       reference = litTest$Diagnosis, positive = 'Depression')
+
+confusionMatrix(as.factor(ifelse(litPredictionsProb$XGB > thresholds[7], "Depression", "Control")),
+                       reference = litTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(litPredictionsProb$XGBDown > thresholds[8], "Depression", "Control")),
+                       reference = litTest$Diagnosis, positive = 'Depression')
+
+confusionMatrix(as.factor(ifelse(litPredictionsProb$nb > thresholds[9], "Depression", "Control")),
+                       reference = litTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(litPredictionsProb$nbDown > thresholds[10], "Depression", "Control")),
+                       reference = litTest$Diagnosis, positive = 'Depression')
+
+confusionMatrix(as.factor(ifelse(litPredictionsProb$knn > thresholds[11], "Depression", "Control")),
+                       reference = litTest$Diagnosis, positive = 'Depression')
+confusionMatrix(as.factor(ifelse(litPredictionsProb$knnDown > thresholds[12], "Depression", "Control")),
+                       reference = litTest$Diagnosis, positive = 'Depression')
+##### thresholds are shit
+```
+
+
+#auc and roc curves - lit features
+```{r}
+#auc and ROC curves
+rocFun <- function(columnName){
+  rocObj <-roc(litTest$Diagnosis, litPredictionsProb[,columnName], levels = rev(levels(litTest$Diagnosis)))
+}
+
+litPredictionsProb <- as.data.frame(litPredictionsProb)
+rocs <- colnames(litPredictionsProb)
+
+##creating ROC objects and plotting ROC curves
+ROCS <- lapply(rocs, rocFun)
+rocs
+par(pty="s")
+plot(ROCS[[1]], legacy.axes = TRUE, col = 'green') #bayesLog
+plot(ROCS[[2]], legacy.axes = TRUE, add = T, col = 'darkgreen') #bayesLogDown
+plot(ROCS[[3]], legacy.axes = TRUE, add = T, col = 'deepskyblue')   #svmLin
+plot(ROCS[[4]], legacy.axes = TRUE, add = T, col = 'dodgerblue2')   #svmLinDown
+plot(ROCS[[5]], legacy.axes = TRUE, add = T, col = 'firebrick1')   #svmRbf
+plot(ROCS[[6]], legacy.axes = TRUE, add = T, col = 'brown')   #svmRbfDown
+
+legend("bottomright", inset = 0.02, legend = c("BayesLog", "BayesLogDown", "SvmLin", "SvmLinDown", "svmRbf", "svmRbfDown"), col = c("green", "darkgreen", "deepskyblue", "dodgerblue2", "firebrick1", "brown"), lty = 1, cex = 0.8)
+title("ROC for each algorithm [1/3]", cex = 0.8, line = 2.5)
+
+
+plot(ROCS[[7]], legacy.axes = TRUE, add = F, col = 'green')   #rf
+plot(ROCS[[8]], legacy.axes = TRUE, add = T, col = 'darkgreen')   #rfDown
+plot(ROCS[[9]], legacy.axes = TRUE, add = T, col = 'deepskyblue')   #XGB
+plot(ROCS[[10]], legacy.axes = TRUE, add = T, col = 'dodgerblue2')  #XGBdown
+plot(ROCS[[11]], legacy.axes = TRUE, add = T, col = 'firebrick1')   #nb
+plot(ROCS[[12]], legacy.axes = TRUE, add = T, col = 'brown')   #nbDown
+
+legend("bottomright", inset = 0.02, legend = c("rf", "rfDown", "XGB", "XGBDown", "nb", "nbDown"), col = c("green", "darkgreen", "deepskyblue", "dodgerblue2", "firebrick1", "brown"), lty = 1, cex = 0.8)
+title("ROC for each algorithm [2/3]", cex = 0.8, line = 2.5)
+
+
+plot(ROCS[[13]], legacy.axes = TRUE, add = F, col = 'deepskyblue')   #knn
+plot(ROCS[[14]], legacy.axes = TRUE, add = T, col = 'dodgerblue2')   #knnDown
+plot(ROCS[[15]], legacy.axes = TRUE, add = T, col = 'firebrick1')   #ensembleMax
+plot(ROCS[[16]], legacy.axes = TRUE, add = T, col = 'brown')   #ensembleMean
+plot(ROCS[[17]], legacy.axes = TRUE, add = T, col = 'indianred1')  #ensembleMedian
+
+legend("bottomright", inset = 0.02, legend = c("knn", "knnDown", "ensembleMax", "ensembleMean", "ensembleMedian"), col = c("deepskyblue", "dodgerblue2", "firebrick1", "brown", "indianred1"), lty = 1, cex = 0.8)
+title("ROC for each algorithm [3/3]", cex = 0.8, line = 2.5)
+
+
+#auc
+aucDf <- data.frame(lower = NA, auc = NA, upper = NA, model = rocs)
+for(i in 1:length(rocs)){
+  aucDf$lower[i] <- round(ci(ROCS[[i]])[1],2)
+  aucDf$auc[i] <- round(ci(ROCS[[i]])[2],2)
+  aucDf$upper[i] <- round(ci(ROCS[[i]])[3],2)
+}
+
+arrange.vars(aucDf, c('auc' = 1))
+```
+
+
+
+################ HYPOTHESIS 3 - PREDICTING DEP AT VISIT 2 (REMISSION) ####################################
+
+```{r}
+#using the 2 best models from each feature set
+load('contDepNb.RData')
+load('contDepDownNb.RData')
+
+load('svmlitDownLinNoWeights.RData')
+load('svmlitDownRbfNoWeights.RData')
+
+#loading the dataset
+depV2 <- read.csv('depVisit2.csv')
+#recoding the levels of diagnosis to be all 'controls'  (for confusion matrix to display properly)
+depV2$Diagnosis <- as.factor(ifelse(depV2$Diagnosis == 'Depression', 'Control', 'Depression'))
+
+v2ModelListLit <- list(svmLinDownLit = svmlitDownLinNoWeights,
+                     svmRbfDownLit = svmlitDownRbfNoWeights)
+
+v2ModelListElastic <- list(nbElastic = contDepNb,
+                     nbDownElastic = contDepDownNb)
+
+
+
+#adding predictions to df
+predictFun <- function(model, data, type = 'prob'){
+  if(type == 'prob'){
+  pred <- predict(model, newdata = data, type = "prob", re_formula = NA)[,2]
+  }
+  if(type == 'prediction'){
+  pred <- predict(model, newdata = data)
+  }
+  return(pred)
+}
+
+#calculating prediction probabilites (needs tobe done in two since they use different sets of predictors)
+v2PredictionsProbLit <- lapply(v2ModelListLit, predictFun, data = depV2[,litPredictors], type ='prob')%>%
+  bind_rows()
+
+v2PredictionsProbElastic <- lapply(v2ModelListElastic, predictFun, data = depV2[,contDepPredictors], type ='prob')%>%
+  bind_rows()
+
+#binding together to one df
+v2PredictionsProb <- cbind(v2PredictionsProbLit, v2PredictionsProbElastic)
+
+#calculationg predicted class
+v2PredictionsLit <- lapply(v2ModelListLit, predictFun, data = depV2[,litPredictors], type = 'prediction') %>%
+  bind_rows()
+
+v2PredictionsElastic <- lapply(v2ModelListElastic, predictFun, data = depV2[,contDepPredictors], type = 'prediction') %>%
+  bind_rows()
+
+v2Predictions <- cbind(v2PredictionsLit, v2PredictionsElastic)
+
+```
+
+#ensemble
+```{r}
+#try different types of ensembles
+#choosing the most confident predictor
+v2PredictionsProb$ensembleMax <- apply(v2PredictionsProb, 1, max)
+#pooling predictions with mean
+v2PredictionsProb$ensembleMean <- apply(v2PredictionsProb, 1, mean)
+
+#adding adding ensemble predictions to the predictions df
+v2Predictions$ensembleMax <- as.factor(ifelse(v2PredictionsProb$ensembleMax > 0.5, "Depression", "Control"))
+v2Predictions$ensembleMean <- as.factor(ifelse(v2PredictionsProb$ensembleMean > 0.5, "Depression", "Control"))
+```
+
+#performance
+```{r}
+
+#since there are only controls in the depV2 set (and therefore only 1 level), we have to add another level (for depression) for the confusion matrix to work
+levels(depV2$Diagnosis) <- c('Control', 'Depression')
+confusionMatrix(data = v2Predictions$svmLinDownLit, reference = depV2$Diagnosis, positive = "Control")
+confusionMatrix(data = v2Predictions$svmRbfDownLit, reference = depV2$Diagnosis, positive = "Control")
+
+confusionMatrix(data = v2Predictions$nbElastic, reference = depV2$Diagnosis, positive = "Control")
+confusionMatrix(data = v2Predictions$nbDownElastic, reference = depV2$Diagnosis, positive = "Control")
+
+
+#testing how predictions are distributed
+depV2$DiagnosisInteger <- ifelse(depV2$Diagnosis == "Depression", 1, 0)
+
+
+v2Error <- v2PredictionsProb %>%
+  mutate(id = depV2$id, diagnosis = depV2$DiagnosisInteger) %>%
+  group_by(id) %>%
+  summarise_if(is.numeric, mean) %>%
+  arrange.vars(., c('diagnosis' = 2))
+#  mutate_if(is.numeric, ifelse(. > 0.5, 'Depression', 'Control'))
+
+#adding column with mean prediction
+v2Error$meanPred <- apply(v2Error[,3:6], 1, mean)
+v2Error[,3:9] <- round(v2Error[,3:9], 2)
+arrange.vars(v2Error, c('meanPred' = 7))
+```
+
+
+
+
+
+
+# HYPOTHESIS 2 - PREDICTING REMISSION ################################################################################
+
+### NO SIGNIFICANT PREDICTORS FROM ELASTIC NET - NULL RESULT ¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤¤
+
+### HYPOTHESIS 2 (ELASTIC NET NOT NESTED BY ID)
 
 #downsampling remission data, creating folds for cv and creating control statements for caret's train function
 ```{r}
@@ -472,6 +2040,11 @@ depDown %>%
   count(Remission, id) %>% 
   kable()
 #8 id in each group
+
+#
+depDownFormula <- depDown %>%
+  dplyr::select(depPredictors, Remission, id)
+
 
 #creating folds to use for the index argument in trainControl which respect the groupings in the data
 #ie no ids are present in 2 groups
@@ -523,22 +2096,30 @@ depCtrlNoProb <- trainControl(method = "cv",
                      index = depTrainFold)
 ```
 
-
-
-Bayesian logistic models
+#Bayesian logistic models
 ```{r}
+priors <- c(set_prior("normal(0,3)", class = "b"), set_prior("normal(0,3)", class = "Intercept"))
 
 depLogistic <- brm(Remission ~.-id + (1|id), 
                     data = depFormula, family = bernoulli(), 
                     cores = 4, chains = 4, 
+                    prior = priors,
                     control = list(adapt_delta = .998, max_treedepth = 15))
 depLogistic
 
 save(depLogistic, file = 'depLogistic.RData')
 
-##not finished
-```
+depDownLogistic <- brm(Remission ~.-id + (1|id), 
+                    data = depDownFormula, family = bernoulli(), 
+                    cores = 4, chains = 4, 
+                    prior = priors,
+                    control = list(adapt_delta = .998, max_treedepth = 15))
+depDownLogistic
 
+save(depDownLogistic, file = 'depDownLogistic.RData')
+
+
+```
 
 #SVM models
 ```{r predicting remission}
@@ -558,6 +2139,7 @@ svmDepLinNoWeights <- train(x = dep[,depPredictors], y = dep$Remission,
                     trControl=depCtrl,
                     tuneGrid = grid)
 
+plot(svmDepLinNoWeights)
 svmDepLinNoWeights
 save(svmDepLinNoWeights, file = 'svmDepLinNoWeights.RData')
 
@@ -718,14 +2300,16 @@ confusionMatrix(data = evalResults$SVMRbfWeighted, reference = evalResults$Remis
 #### ^^ TRAIN THRESHOLD ON TRAIN DATA INSTEAD
 ```
 
-
 #Random forest
 ```{r}
+rfGrid <- expand.grid(.mtry=seq(1, 61, by = 5))
 #full training set
 depRf <- train(x = dep[,depPredictors], y = dep$Remission,
                     method = "rf",
                     metric = "ROC",
+                    tuneGrid = rfGrid,
                     trControl=depCtrl)
+plot(depRf)
 depRf #everything is remission
 save(depRf,  file = 'depRf.RData')
 
@@ -733,13 +2317,13 @@ save(depRf,  file = 'depRf.RData')
 depDownRf <- train(x = depDown[,depPredictors], y = depDown$Remission,
                     method = "rf",
                     metric = "ROC",
+                    tuneGrid = rfGrid,
                     trControl=depDownCtrl)
 depDownRf
 save(depDownRf, file =  'depDownRf.RData')
 #better, but still bad..
 
 ```
-
 
 #XGboost
 ```{r}
@@ -940,7 +2524,6 @@ xgbFit
 
 ```
 
-
 Naive Bayes
 ```{r}
 #http://uc-r.github.io/naive_bayes   <- nice tutorial 
@@ -1008,12 +2591,8 @@ depDownKnn
 save(depDownKnn, file = 'depDownKnn.RData')
 ```
 
-Ensemble
-```{r}
-### TO DO
-```
 
-Predictions and performance
+Predictions
 ```{r}
 ############################# TESTING PERFORMANCE - REMISSION DATA #######################
 ################# WORK IN PROGRESS #####################
@@ -1025,9 +2604,13 @@ depTest$Remission <- ifelse(depTest$Remission == 0, 'NoRemission', 'Remission')
 depTest$Remission <- as.factor(depTest$Remission)
 
 #making new dataframe to hold only predictions
-depResults <- data.frame(Remission = depTest$Remission)
+depResults <- data.frame(Remission = depTest$Remission, id = id)
 
 #loading models 
+
+load('depLogistic.RData')
+load('depDownLogistic.RData')
+
 load('svmDepLinNoWeights.RData')
 load('svmDepDownLinNoWeights.RData')
 load('svmDepLinWeighted.RData')
@@ -1050,19 +2633,22 @@ load('depDownKnn.RData')
 
 ######### list of models
 #without the weighted svm (since it doesn't make sense to calculate probabilities from the weighted models)
-depModelListProps <- list(svmLin = svmDepLinNoWeights,
-                     svmLinDown = svmDepDownLinNoWeights,
-                     svmRbf = svmDepRbfNoWeights,
-                     svmRbfDown = svmDepDownRbfNoWeights,
+depModelListProps <- list(bayesLog = depLogistic,
+                          bayesLogDown = depDownLogistic,
+                          
+                          svmLin = svmDepLinNoWeights,
+                          svmLinDown = svmDepDownLinNoWeights,
+                          svmRbf = svmDepRbfNoWeights,
+                          svmRbfDown = svmDepDownRbfNoWeights,
+                          
+                          rf = depRf,
+                          rfDown = depDownRf,
 
-                     rf = depRf,
-                     rfDown = depDownRf,
+                          nb = depNb,
+                          nbDown = depDownNb,
 
-                     nb = depNb,
-                     nbDown = depDownNb,
-
-                     knn = depKnn,
-                     knnDown = depDownKnn)
+                          knn = depKnn,
+                          knnDown = depDownKnn)
 #with all models
 
 depWeightedModels <- list(svmLinWeighted = svmDepLinWeighted,
@@ -1075,27 +2661,62 @@ depModelList <- c(depModelListProps, depWeightedModels)
 #adding predictions to df
 predictFun <- function(model, data, type = 'prob'){
   if(type == 'prob'){
-  pred <- predict(model, newdata = data, type = "prob")$Remission
+  pred <- predict(model, newdata = data, type = "prob", re_formula = NA)[,2]
   }
   if(type == 'prediction'){
-  pred <- predict(model, newdata = data)
+  pred <- predict(model, newdata = data, re_formula = NA)
   }
   return(pred)
 }
 
+
 #calculating prediction probabilites
-depPredictionsProb <- lapply(depModelListProps, predictFun, data = depTest[,depPredictors], type ='prob')
-depPredictionsProb <- bind_rows(depPredictionsProb)
+depPredictionsProb <- lapply(depModelListProps, predictFun, data = depTest[,depPredictors], type ='prob') %>%
+  bind_rows()
 
 #calculating predicted class
-depPredictions <- lapply(depModelList, predictFun, data = depTest[,depPredictors], type = 'prediction')
-depPredictions <- bind_rows(depPredictions)
+#predict function for brms models behaves a bit differently, needs to be done seperately/in another function and added to the dataframe
+noBayes <- c("bayesLog", "bayesLogDown")
+depModelListNoBayes <-  depModelList[-which(names(depModelList) == noBayes)]  
 
+
+depPredictions <- lapply(depModelListNoBayes, predictFun, data = depTest[,depPredictors], type = 'prediction') %>%
+  bind_rows()
+
+bayesLog <- ifelse(predict(depLogistic, newdata = depTest[,depPredictors], re_formula = NA)[,1] > 0.5, 'Remission', 'NoRemission')
+bayesLogDown <- ifelse(predict(depDownLogistic, newdata = depTest[,depPredictors], re_formula = NA)[,1] > 0.5, 'Remission', 'NoRemission')
+
+
+depPredictions <- depPredictions %>%
+  mutate(bayesLog = as.factor(ifelse(predict(depLogistic, newdata = depTest[,depPredictors], re_formula = NA)[,1] > 0.5, 'Remission', 'NoRemission')),
+         bayesLogDown = as.factor(ifelse(predict(depDownLogistic, newdata = depTest[,depPredictors], re_formula = NA)[,1] > 0.5, 'Remission', 'NoRemission')))
+```
+
+ensemble
+```{r}
+#try different types of ensembles
+#choosing the most confident predictor
+depPredictionsProb$ensembleMax <- apply(depPredictionsProb, 1, max)
+#pooling predictions with mean
+depPredictionsProb$ensembleMean <- apply(depPredictionsProb, 1, mean)
+#pooling preditions with median
+depPredictionsProb$ensembleMedian <- apply(depPredictionsProb, 1, median)
+
+depPredictions$ensembleMax <- as.factor(ifelse(depPredictionsProb$ensembleMax > 0.5, "Remission", "NoRemission"))
+depPredictions$ensembleMean <- as.factor(ifelse(depPredictionsProb$ensembleMean > 0.5, "Remission", "NoRemission"))
+depPredictions$ensembleMedian <- as.factor(ifelse(depPredictionsProb$ensembleMedian > 0.5, "Remission", "NoRemission"))
+```
+
+Performance
+```{r}
 
 #confusion matrices
-confusionMatrix(data = depPredictions$svmLin, reference = depPredictions$Remission, positive = "Remission")
-confusionMatrix(data = depPredictions$svmLinDown, reference = depPredictions$Remission, positive = "Remission")
-confusionMatrix(data = depPredictions$svmLinWeighted, reference = depPredictions$Remission, positive = "Remission")
+confusionMatrix(data = depPredictions$bayesLog, reference = depTest$Remission, positive = "Remission")
+confusionMatrix(data = depPredictions$bayesLogDown, reference = depTest$Remission, positive = "Remission")
+
+confusionMatrix(data = depPredictions$svmLin, reference = depTest$Remission, positive = "Remission")
+confusionMatrix(data = depPredictions$svmLinDown, reference = depTest$Remission, positive = "Remission")
+confusionMatrix(data = depPredictions$svmLinWeighted, reference = depTest$Remission, positive = "Remission")
 confusionMatrix(data = depPredictions$svmRbf, reference = depTest$Remission, positive = "Remission")
 confusionMatrix(data = depPredictions$svmRbfDown, reference = depTest$Remission, positive = "Remission")
 confusionMatrix(data = depPredictions$svmRbfWeighted, reference = depTest$Remission, positive = "Remission")
@@ -1109,11 +2730,14 @@ confusionMatrix(data = depPredictions$nbDown, reference = depTest$Remission, pos
 confusionMatrix(data = depPredictions$knn, reference = depTest$Remission, positive = "Remission")
 confusionMatrix(data = depPredictions$knnDown, reference = depTest$Remission, positive = "Remission")
 
+confusionMatrix(data = depPredictions$ensembleMax, reference = depTest$Remission, positive = "Remission")
+confusionMatrix(data = depPredictions$ensembleMean, reference = depTest$Remission, positive = "Remission")
+confusionMatrix(data = depPredictions$ensembleMedian, reference = depTest$Remission, positive = "Remission")
+
+
 #auc and ROC curves
 ROCFun <- function(columnName){
   rocObj <-roc(depTest$Remission, depPredictionsProb[,columnName], levels = rev(levels(depTest$Remission)))
-  ciRoc <- ci(rocObj)
-  return(ciRoc)
 }
 
 depPredictionsProb <- as.data.frame(depPredictionsProb)
@@ -1143,7 +2767,7 @@ for(i in 1:length(rocs)){
   aucDf$auc[i] <- ci(ROCS[[i]])[2]
   aucDf$upper[i] <- ci(ROCS[[i]])[3]
 }
+aucDf <- arrange.vars(aucDf, "model" = 1)
+
 aucDf
 ```
-
-
