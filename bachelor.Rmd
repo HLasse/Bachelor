@@ -113,7 +113,6 @@ return(mergedDf)
 
 ```
 
-
 #arrange vars function
 ```{r arrange vars function}
 ##arrange df vars by position
@@ -1383,6 +1382,20 @@ plot(roc(litDownKnn$pred$obs, litDownKnn$pred$Depression),
 
 ```
 
+
+#function for calculating most confident predictor
+```{r}
+#function to calculate the most confident predictor
+#takes a vector as input (e.g. a row of different models predictions) and chooses the value that is closest to either 0 or 1
+mostConf <- function(vec){
+  confRow <- which.min(abs(vec-c(0,1))) #finds the distances to 0 and 1 for each value, chooses the lowest of them and then picks the lowest across all values
+  mostConf <- vec[confRow]
+  return(mostConf)
+}
+
+```
+
+
 Predictions - elastic net
 ```{r}
 ############################# TESTING PERFORMANCE - Diagnosis #######################
@@ -1476,130 +1489,16 @@ contDepPredictions <- contDepPredictions %>%
 ```{r}
 #try different types of ensembles
 #choosing the most confident predictor
-contDepPredictionsProb$ensembleMax <- apply(contDepPredictionsProb, 1, max)
+contDepPredictionsProb$ensembleMax <- apply(contDepPredictionsProb[,1:14], 1, mostConf)
 #pooling predictions with mean
-contDepPredictionsProb$ensembleMean <- apply(contDepPredictionsProb, 1, mean)
+contDepPredictionsProb$ensembleMean <- apply(contDepPredictionsProb[,1:14], 1, mean)
 #pooling preditions with median
-contDepPredictionsProb$ensembleMedian <- apply(contDepPredictionsProb, 1, median)
+contDepPredictionsProb$ensembleMedian <- apply(contDepPredictionsProb[,1:14], 1, median)
 
 #adding adding ensemble predictions to the predictions df
 contDepPredictions$ensembleMax <- as.factor(ifelse(contDepPredictionsProb$ensembleMax > 0.5, "Depression", "Control"))
 contDepPredictions$ensembleMean <- as.factor(ifelse(contDepPredictionsProb$ensembleMean > 0.5, "Depression", "Control"))
 contDepPredictions$ensembleMedian <- as.factor(ifelse(contDepPredictionsProb$ensembleMedian > 0.5, "Depression", "Control"))
-```
-
-Predictions - lit features
-```{r}
-############################# TESTING PERFORMANCE - Diagnosis #######################
-################# WORK IN PROGRESS #####################
-litTest <- read.csv("contDep_test.csv")
-
-#making new dataframe to hold only predictions
-litResults <- data.frame(Diagnosis = litTest$Diagnosis)
-
-#loading models 
-load('litLogistic.RData')
-load('litDownLogistic.RData')
-
-load('svmlitLinNoWeights.RData')
-load('svmlitDownLinNoWeights.RData')
-#load('svmlitLinWeighted.RData')
-#load('svmlitDownLinWeighted.RData')
-
-load('svmlitRbfNoWeights.RData')
-load('svmlitDownRbfNoWeights.RData')
-#load('svmlitRbfWeighted.RData')
-#load('svmlitDownRbfWeighted.RData')
-
-load('litRf.RData')
-load('litDownRf.RData')
-
-load('litXGB.RData')
-load('litDownXGB.RData')
-
-load('litNb.RData')
-load('litDownNb.RData')
-
-load('litKnn.RData')
-load('litDownKnn.RData')
-
-
-######### list of models
-#without the weighted svm (since it doesn't make sense to calculate probabilities from the weighted models)
-litModelList <- list(bayesLog = litLogistic,
-                          bayesLogDown = litDownLogistic,
-                          
-                          svmLin = svmlitLinNoWeights,
-                          svmLinDown = svmlitDownLinNoWeights,
-                          svmRbf = svmlitRbfNoWeights,
-                          svmRbfDown = svmlitDownRbfNoWeights,
-
-                          rf = litRf,
-                          rfDown = litDownRf,
-                          
-                          XGB = litXGB,
-                          XGBDown = litDownXGB,
-
-                          nb = litNb,
-                          nbDown = litDownNb,
-
-                          knn = litKnn,
-                          knnDown = litDownKnn)
-
-#adding predictions to df
-predictFun <- function(model, data, type = 'prob'){
-  if(type == 'prob'){
-  pred <- predict(model, newdata = data, type = "prob", re_formula = NA)[,2]
-  }
-  if(type == 'prediction'){
-  pred <- predict(model, newdata = data)
-  }
-  return(pred)
-}
-
-#calculating prediction probabilites
-litPredictionsProb <- lapply(litModelList, predictFun, data = litTest[,litPredictors], type ='prob')%>%
-  bind_rows()
-
-#calculating predicted class
-#predict function for brms models behaves a bit differently, needs to be done seperately/in another function and added to the dataframe
-noBayes <- c("bayesLog", "bayesLogDown")
-litModelListNoBayes <- litModelList[-which(names(litModelList) == noBayes)]  
-
-
-litPredictions <- lapply(litModelListNoBayes, predictFun, data = litTest[,litPredictors], type = 'prediction') %>%
-  bind_rows()
-
-
-
-litPredictions <- litPredictions %>%
-  mutate(bayesLog = as.factor(ifelse(predict(litLogistic, newdata = litTest[,litPredictors], re_formula = NA)[,1] > 0.5, 'Depression', 'Control')),
-         bayesLogDown = as.factor(ifelse(predict(litDownLogistic, newdata = litTest[,litPredictors], re_formula = NA)[,1] > 0.5, 'Depression', 'Control')))
-```
-
-#ensemble - lit features
-```{r}
-#try different types of ensembles
-#choosing the most confident predictor
-litPredictionsProb$ensembleMax <- apply(litPredictionsProb, 1, max)
-#pooling predictions with mean
-litPredictionsProb$ensembleMean <- apply(litPredictionsProb, 1, mean)
-#pooling preditions with median
-litPredictionsProb$ensembleMedian <- apply(litPredictionsProb, 1, median)
-
-#adding adding ensemble predictions to the predictions df
-litPredictions$ensembleMax <- as.factor(ifelse(litPredictionsProb$ensembleMax > 0.5, "Depression", "Control"))
-litPredictions$ensembleMean <- as.factor(ifelse(litPredictionsProb$ensembleMean > 0.5, "Depression", "Control"))
-litPredictions$ensembleMedian <- as.factor(ifelse(litPredictionsProb$ensembleMedian > 0.5, "Depression", "Control"))
-
-bestThree <- litPredictionsProb %>%
-  select(svmLinDown, svmRbfDown, bayesLogDown) %>%
-  mutate(maxProb = apply(., 1, max), meanProb = apply(., 1, mean), medianProb = apply(., 1, median))
-
-litPredictions$best3Max <- as.factor(ifelse(bestThree$maxProb > 0.5, "Depression", "Control"))
-litPredictions$best3Mean <- as.factor(ifelse(bestThree$meanProb > 0.5, "Depression", "Control"))
-litPredictions$best3Median <- as.factor(ifelse(bestThree$medianProb > 0.5, "Depression", "Control"))
-
 ```
 
 #performance - elastic net
@@ -1767,6 +1666,119 @@ contDepError <- asFactors %>%
 contDepError
 ```
 
+Predictions - lit features
+```{r}
+############################# TESTING PERFORMANCE - Diagnosis #######################
+################# WORK IN PROGRESS #####################
+litTest <- read.csv("contDep_test.csv")
+
+#making new dataframe to hold only predictions
+litResults <- data.frame(Diagnosis = litTest$Diagnosis)
+
+#loading models 
+load('litLogistic.RData')
+load('litDownLogistic.RData')
+
+load('svmlitLinNoWeights.RData')
+load('svmlitDownLinNoWeights.RData')
+#load('svmlitLinWeighted.RData')
+#load('svmlitDownLinWeighted.RData')
+
+load('svmlitRbfNoWeights.RData')
+load('svmlitDownRbfNoWeights.RData')
+#load('svmlitRbfWeighted.RData')
+#load('svmlitDownRbfWeighted.RData')
+
+load('litRf.RData')
+load('litDownRf.RData')
+
+load('litXGB.RData')
+load('litDownXGB.RData')
+
+load('litNb.RData')
+load('litDownNb.RData')
+
+load('litKnn.RData')
+load('litDownKnn.RData')
+
+
+######### list of models
+#without the weighted svm (since it doesn't make sense to calculate probabilities from the weighted models)
+litModelList <- list(bayesLog = litLogistic,
+                          bayesLogDown = litDownLogistic,
+                          
+                          svmLin = svmlitLinNoWeights,
+                          svmLinDown = svmlitDownLinNoWeights,
+                          svmRbf = svmlitRbfNoWeights,
+                          svmRbfDown = svmlitDownRbfNoWeights,
+
+                          rf = litRf,
+                          rfDown = litDownRf,
+                          
+                          XGB = litXGB,
+                          XGBDown = litDownXGB,
+
+                          nb = litNb,
+                          nbDown = litDownNb,
+
+                          knn = litKnn,
+                          knnDown = litDownKnn)
+
+#adding predictions to df
+predictFun <- function(model, data, type = 'prob'){
+  if(type == 'prob'){
+  pred <- predict(model, newdata = data, type = "prob", re_formula = NA)[,2]
+  }
+  if(type == 'prediction'){
+  pred <- predict(model, newdata = data)
+  }
+  return(pred)
+}
+
+#calculating prediction probabilites
+litPredictionsProb <- lapply(litModelList, predictFun, data = litTest[,litPredictors], type ='prob')%>%
+  bind_rows()
+
+#calculating predicted class
+#predict function for brms models behaves a bit differently, needs to be done seperately/in another function and added to the dataframe
+noBayes <- c("bayesLog", "bayesLogDown")
+litModelListNoBayes <- litModelList[-which(names(litModelList) == noBayes)]  
+
+
+litPredictions <- lapply(litModelListNoBayes, predictFun, data = litTest[,litPredictors], type = 'prediction') %>%
+  bind_rows()
+
+
+
+litPredictions <- litPredictions %>%
+  mutate(bayesLog = as.factor(ifelse(predict(litLogistic, newdata = litTest[,litPredictors], re_formula = NA)[,1] > 0.5, 'Depression', 'Control')),
+         bayesLogDown = as.factor(ifelse(predict(litDownLogistic, newdata = litTest[,litPredictors], re_formula = NA)[,1] > 0.5, 'Depression', 'Control')))
+```
+
+#ensemble - lit features
+```{r}
+#try different types of ensembles
+#choosing the most confident predictor
+litPredictionsProb$ensembleMax <- apply(litPredictionsProb[,1:14], 1, mostConf)
+#pooling predictions with mean
+litPredictionsProb$ensembleMean <- apply(litPredictionsProb[,1:14], 1, mean)
+#pooling preditions with median
+litPredictionsProb$ensembleMedian <- apply(litPredictionsProb[,1:14], 1, median)
+
+#adding adding ensemble predictions to the predictions df
+litPredictions$ensembleMax <- as.factor(ifelse(litPredictionsProb$ensembleMax > 0.5, "Depression", "Control"))
+litPredictions$ensembleMean <- as.factor(ifelse(litPredictionsProb$ensembleMean > 0.5, "Depression", "Control"))
+litPredictions$ensembleMedian <- as.factor(ifelse(litPredictionsProb$ensembleMedian > 0.5, "Depression", "Control"))
+
+bestThree <- litPredictionsProb %>%
+  select(svmLinDown, svmRbfDown, bayesLogDown) %>%
+  mutate(maxProb = apply(., 1, max), meanProb = apply(., 1, mean), medianProb = apply(., 1, median))
+
+litPredictions$best3Max <- as.factor(ifelse(bestThree$maxProb > 0.5, "Depression", "Control"))
+litPredictions$best3Mean <- as.factor(ifelse(bestThree$meanProb > 0.5, "Depression", "Control"))
+litPredictions$best3Median <- as.factor(ifelse(bestThree$medianProb > 0.5, "Depression", "Control"))
+
+```
 
 #performance - lit features
 ```{r}
@@ -1836,7 +1848,6 @@ confusionMatrix(as.factor(ifelse(litPredictionsProb$knnDown > thresholds[12], "D
 ##### thresholds are shit
 ```
 
-
 #auc and roc curves - lit features
 ```{r}
 #auc and ROC curves
@@ -1898,6 +1909,7 @@ arrange.vars(aucDf, c('auc' = 1))
 
 ################ HYPOTHESIS 3 - PREDICTING DEP AT VISIT 2 (REMISSION) ####################################
 
+#predictions
 ```{r}
 #using the 2 best models from each feature set
 load('contDepNb.RData')
@@ -1955,9 +1967,9 @@ v2Predictions <- cbind(v2PredictionsLit, v2PredictionsElastic)
 ```{r}
 #try different types of ensembles
 #choosing the most confident predictor
-v2PredictionsProb$ensembleMax <- apply(v2PredictionsProb, 1, max)
+v2PredictionsProb$ensembleMax <- apply(v2PredictionsProb[,1:4], 1, mostConf)
 #pooling predictions with mean
-v2PredictionsProb$ensembleMean <- apply(v2PredictionsProb, 1, mean)
+v2PredictionsProb$ensembleMean <- apply(v2PredictionsProb[,1:4], 1, mean)
 
 #adding adding ensemble predictions to the predictions df
 v2Predictions$ensembleMax <- as.factor(ifelse(v2PredictionsProb$ensembleMax > 0.5, "Depression", "Control"))
@@ -1975,22 +1987,26 @@ confusionMatrix(data = v2Predictions$svmRbfDownLit, reference = depV2$Diagnosis,
 confusionMatrix(data = v2Predictions$nbElastic, reference = depV2$Diagnosis, positive = "Control")
 confusionMatrix(data = v2Predictions$nbDownElastic, reference = depV2$Diagnosis, positive = "Control")
 
+confusionMatrix(data = v2Predictions$ensembleMax, reference = depV2$Diagnosis, positive = "Control")
+confusionMatrix(data = v2Predictions$ensembleMean, reference = depV2$Diagnosis, positive = "Control")
+
 
 #testing how predictions are distributed
 depV2$DiagnosisInteger <- ifelse(depV2$Diagnosis == "Depression", 1, 0)
 
 
 v2Error <- v2PredictionsProb %>%
-  mutate(id = depV2$id, diagnosis = depV2$DiagnosisInteger) %>%
+  mutate(id = depV2$id) %>%
   group_by(id) %>%
-  summarise_if(is.numeric, mean) %>%
-  arrange.vars(., c('diagnosis' = 2))
+  summarise_if(is.numeric, mean) 
 #  mutate_if(is.numeric, ifelse(. > 0.5, 'Depression', 'Control'))
 
 #adding column with mean prediction
-v2Error$meanPred <- apply(v2Error[,3:6], 1, mean)
-v2Error[,3:9] <- round(v2Error[,3:9], 2)
-arrange.vars(v2Error, c('meanPred' = 7))
+v2Error[,2:7] <-round(v2Error[,2:7], 2)
+
+#pretty printing
+v2Error$id <- as.numeric(str_extract(as.character(v2Error$id), "\\d+"))
+v2Error[order(v2Error$id),]
 ```
 
 
