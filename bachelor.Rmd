@@ -237,12 +237,32 @@ mergeDf$visit <- str_sub(mergeDf$id, start= -2)
 depDf <- mergeDf %>%
   filter(Diagnosis == 'Depression' & visit == 'v1')
 
+#gender distribution
+depDf %>% count(Gender)
+depDf %>% group_by(Gender) %>% summarise(length(unique(id)))
+#average min of interviewee speech
+(nrow(depDf)/length(unique(depDf$id)))/2
+#age
+summary(depDf$Age); sd(depDf$Age, na.rm = T)
+
 #depression at visit 2 = those who experienced remission
 dep2Df <- mergeDf %>% 
   filter(visit == "v2")
 
+dep2Df %>% count(Gender)
+dep2Df %>% group_by(Gender) %>% summarise(length(unique(id)))
+(nrow(dep2Df)/length(unique(dep2Df$id)))/2
+summary(dep2Df$Age); sd(dep2Df$Age, na.rm = T)
+
+
 contDf <- mergeDf %>% 
   filter(Diagnosis == "Control")
+
+contDf %>% count(Gender)
+contDf %>% group_by(Gender) %>% summarise(length(unique(id)))
+(nrow(contDf)/length(unique(contDf$id)))/2
+summary(contDf$Age); sd(contDf$Age, na.rm = T)
+
 
 
 write.csv(dep2Df, 'depVisit2.csv', row.names = F)
