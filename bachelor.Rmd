@@ -241,6 +241,10 @@ depDf <- mergeDf %>%
 dep2Df <- mergeDf %>% 
   filter(visit == "v2")
 
+contDf <- mergeDf %>% 
+  filter(Diagnosis == "Control")
+
+
 write.csv(dep2Df, 'depVisit2.csv', row.names = F)
 
 set.seed(100)
@@ -286,7 +290,11 @@ contDep_train_set <- contDepParts[[2]]
 
 #checking amount of diagnosis in test/training set
 
-contDep_train_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(diagnosis = mean(DiagnosisInteger), count = n()) %>%   group_by(diagnosis) %>% summarize(sum(count)) %>% kable()
+contDep_train_set <- read.csv('contDep_train.csv')
+
+contDep_train_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(diagnosis = mean(DiagnosisInteger), n()) %>%  kable()
+
+contDep_train_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(diagnosis = mean(DiagnosisInteger), count = n()) %>%   group_by(diagnosis) %>% summarize(sum(count)) %>%  kable() 
 
 
 contDep_test_set %>% select(DiagnosisInteger, id) %>% group_by(id) %>% summarize(diagnosis = mean(DiagnosisInteger), n()) %>% kable()
@@ -1623,7 +1631,7 @@ aucDf <- arrange.vars(aucDf, c("auc" = 1))
 aucDf
 ```
 
-#distribution of error checking
+#distribution of error checking - elastic net
 ```{r}
 contDepError <- contDepPredictionsProb %>%
   mutate(id = contDepTest$id, diagnosis = contDepTest$DiagnosisInteger) %>%
@@ -1648,9 +1656,18 @@ contDepWindows <- contDepTest %>%
 contDepError <- merge(contDepError, contDepWindows) %>%
   arrange.vars(., c('windows' = 3))
 
+#pretty printing 
+wantedCols <- c('id', 'windows', 'diagnosis', 'nb', 'nbDown')
 
+contDepError$id <- as.numeric(str_extract(as.character(contDepError$id), "\\d+"))
+contDepError[order(contDepError$id),wantedCols]
+contDepError
+
+
+
+
+####Predictions instead of probabilities
 #function to change numeric predictions to factors with the diagnosis
-
 numToFac <- function(columnName){
   diagnosis <- as.factor(ifelse(contDepError[,columnName] > 0.5, 'Depression', 'Control'))
 }
@@ -1905,6 +1922,39 @@ for(i in 1:length(rocs)){
 arrange.vars(aucDf, c('auc' = 1))
 ```
 
+#distribution of errors - lit features
+```{r}
+litError <- litPredictionsProb %>%
+  mutate(id = litTest$id, diagnosis = litTest$DiagnosisInteger) %>%
+  group_by(id) %>%
+  summarise_if(is.numeric, mean) #%>%
+  #mutate_if(is.numeric, ifelse(. > 0.5, 'Depression', 'Control'))
+  
+#finding number of windows pr id
+litWindows <- litTest %>% 
+  select(DiagnosisInteger, id) %>%
+  group_by(id) %>% 
+  summarize(diagnosis = mean(DiagnosisInteger), windows = n())
+
+# #why does this not work??
+# testlitError <- merge(litError, litWindows) %>%
+#   arrange.vars(., c('windows' = 3)) %>%
+#   rowwise() %>%
+#   mutate_at(.vars = names(.)[4:20],
+#             .funs = ifelse(.> 0.5, "Depression", "Control"))
+
+
+litError <- merge(litError, litWindows) %>%
+  arrange.vars(., c('windows' = 3))
+
+litError
+
+#pretty printing
+wantedCols <- c('id', 'windows', 'svmLinDown', 'svmRbfDown')
+
+litError$id <- as.numeric(str_extract(as.character(litError$id), "\\d+"))
+litError[order(litError$id),wantedCols]
+```
 
 
 ################ HYPOTHESIS 3 - PREDICTING DEP AT VISIT 2 (REMISSION) ####################################
@@ -2001,12 +2051,13 @@ v2Error <- v2PredictionsProb %>%
   summarise_if(is.numeric, mean) 
 #  mutate_if(is.numeric, ifelse(. > 0.5, 'Depression', 'Control'))
 
-#adding column with mean prediction
+
 v2Error[,2:7] <-round(v2Error[,2:7], 2)
 
 #pretty printing
+
 v2Error$id <- as.numeric(str_extract(as.character(v2Error$id), "\\d+"))
-v2Error[order(v2Error$id),]
+v2Error[order(v2Error$id),wantedCols]
 ```
 
 
