@@ -2611,6 +2611,51 @@ xgbFit
 
 ```
 
+#XGBoost (v2 - simpler, use) 
+```{r}
+
+set.seed(1)
+depXGB <- train(x = dep[,depPredictors], y = dep$Remission, 
+                 trControl = depCtrl, 
+                 method = "xgbTree", 
+                 metric = "ROC",
+                 #the scale_pos_weight is recommended for imbalanced classes in the xgboost help. They recommend sum(negativeClass)/sum(sum(postiveClass)). Following their recommendation.
+                 scale_pos_weight = sum(dep$Remission == "NoRemission")/sum(dep$Remission == "Remission")) 
+
+#inspecting top results
+depXGB$results %>% 
+  top_n(5, wt = ROC) %>%
+  arrange(desc(ROC))
+
+#plotting roc curve (with threshold for optimal ROC) to see if changing threshold might produce a better balance between spec. and sens (currently sens = 0.35, spec = 0.94)
+plot(roc(depXGB$pred$obs, depXGB$pred$Remission),
+     print.thres = TRUE)
+#suggested threshold = 0.938. sens = 0.55, spec = 0.74
+
+save(depXGB, file = 'depXGB.RData')
+
+
+##for the downsampled data
+depDownXGB <- train(x = depDown[,depPredictors], y = depDown$Remission, 
+                 trControl = depDownCtrl, 
+                 method = "xgbTree", 
+                 metric = "ROC")
+#not including the scale_post_weights argument since the classes are balanced in the downsampled data
+
+
+#inspecting top results
+depDownXGB$results %>% 
+  top_n(5, wt = ROC) %>%
+  arrange(desc(ROC))
+
+#plotting roc curve (with threshold for optimal ROC) to see if changing threshold might produce a better balance between spec. and sens (currently sens = 0.66, spec = 0.73) 
+plot(roc(depDownXGB$pred$obs, depDownXGB$pred$Remission),
+     print.thres = TRUE)
+#suggests a threshold of 0.21: sens = 0.435, spec = 0.727
+save(depDownXGB, file = 'depDownXGB.RData')
+```
+
+
 Naive Bayes
 ```{r}
 #http://uc-r.github.io/naive_bayes   <- nice tutorial 
@@ -2714,6 +2759,9 @@ load('depDownRf.RData')
 load('depNb.RData')
 load('depDownNb.RData')
 
+load('depXGB.RData')
+load('depDownXGB.RData')
+
 load('depKnn.RData')
 load('depDownKnn.RData')
 
@@ -2733,6 +2781,9 @@ depModelListProps <- list(bayesLog = depLogistic,
 
                           nb = depNb,
                           nbDown = depDownNb,
+                          
+                          xgb = depXGB,
+                          xgbDown = depDownXGB,
 
                           knn = depKnn,
                           knnDown = depDownKnn)
@@ -2783,7 +2834,7 @@ ensemble
 ```{r}
 #try different types of ensembles
 #choosing the most confident predictor
-depPredictionsProb$ensembleMax <- apply(depPredictionsProb, 1, max)
+depPredictionsProb$ensembleMax <- apply(depPredictionsProb, 1, mostConf)
 #pooling predictions with mean
 depPredictionsProb$ensembleMean <- apply(depPredictionsProb, 1, mean)
 #pooling preditions with median
@@ -2817,6 +2868,10 @@ confusionMatrix(data = depPredictions$nbDown, reference = depTest$Remission, pos
 confusionMatrix(data = depPredictions$knn, reference = depTest$Remission, positive = "Remission")
 confusionMatrix(data = depPredictions$knnDown, reference = depTest$Remission, positive = "Remission")
 
+confusionMatrix(data = depPredictions$xgb, reference = depTest$Remission, positive = "Remission")
+confusionMatrix(data = depPredictions$xgbDown, reference = depTest$Remission, positive = "Remission")
+
+
 confusionMatrix(data = depPredictions$ensembleMax, reference = depTest$Remission, positive = "Remission")
 confusionMatrix(data = depPredictions$ensembleMean, reference = depTest$Remission, positive = "Remission")
 confusionMatrix(data = depPredictions$ensembleMedian, reference = depTest$Remission, positive = "Remission")
@@ -2831,7 +2886,7 @@ depPredictionsProb <- as.data.frame(depPredictionsProb)
 rocs <- colnames(depPredictionsProb)
 
 ##creating ROC objects and plotting ROC curves
-ROCS <- lapply(rocs, rocFun)
+ROCS <- lapply(rocs, ROCFun)
 rocs
 par(pty="s")
 plot(ROCS[[1]], legacy.axes = TRUE, col = 'black') #svmLin
@@ -2854,7 +2909,8 @@ for(i in 1:length(rocs)){
   aucDf$auc[i] <- ci(ROCS[[i]])[2]
   aucDf$upper[i] <- ci(ROCS[[i]])[3]
 }
-aucDf <- arrange.vars(aucDf, "model" = 1)
+aucDf <- arrange.vars(aucDf, c("auc" = 1))
 
+aucDf[,1:3] <- round(aucDf[,1:3], 2)
 aucDf
 ```
